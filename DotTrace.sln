@@ -1,0 +1,34 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DotTrace.Cli", "src\DotTrace.Cli\DotTrace.Cli.csproj", "{60595C4A-89EA-4256-8AA2-B89C9D414347}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DotTrace.Core", "src\DotTrace.Core\DotTrace.Core.csproj", "{A205D5E6-9710-4895-97CA-7A391E0D5B5A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DotTrace.Tests", "tests\DotTrace.Tests\DotTrace.Tests.csproj", "{5D815982-2A80-4D09-B57A-89F83D69FCFF}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{60595C4A-89EA-4256-8AA2-B89C9D414347}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{60595C4A-89EA-4256-8AA2-B89C9D414347}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{60595C4A-89EA-4256-8AA2-B89C9D414347}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{60595C4A-89EA-4256-8AA2-B89C9D414347}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A205D5E6-9710-4895-97CA-7A391E0D5B5A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A205D5E6-9710-4895-97CA-7A391E0D5B5A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A205D5E6-9710-4895-97CA-7A391E0D5B5A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A205D5E6-9710-4895-97CA-7A391E0D5B5A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5D815982-2A80-4D09-B57A-89F83D69FCFF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5D815982-2A80-4D09-B57A-89F83D69FCFF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5D815982-2A80-4D09-B57A-89F83D69FCFF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5D815982-2A80-4D09-B57A-89F83D69FCFF}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
+
