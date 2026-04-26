@@ -21,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\DotTrace.Cli\DotTrace.Cli.csproj" />
     <ProjectReference Include="..\..\src\DotTrace.Core\DotTrace.Core.csproj" />
   </ItemGroup>
 </Project>
