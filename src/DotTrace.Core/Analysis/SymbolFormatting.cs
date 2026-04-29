@@ -73,7 +73,12 @@ internal static class SymbolFormatting
             _ => parameter.IsParams ? "params " : string.Empty
         };
 
-        return prefix + parameter.Type.ToDisplayString(TypeDisplayFormat);
+        return prefix + FormatType(parameter.Type);
+    }
+
+    public static string FormatType(ITypeSymbol type)
+    {
+        return type.ToDisplayString(TypeDisplayFormat);
     }
 
     private static string ExtractMethodName(string normalizedSelector)

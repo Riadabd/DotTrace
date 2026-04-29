@@ -7,7 +7,7 @@ namespace DotTrace.Tests;
 public sealed class CallGraphSnapshotTests
 {
     [Fact]
-    public async Task Build_write_and_project_active_snapshot_preserves_current_tree_behavior()
+    public async Task Build_write_and_project_active_snapshot_uses_call_site_display_for_children()
     {
         using var fixture = await TestCodebase.CreateAsync();
         var cache = new SqliteGraphCache();
@@ -20,9 +20,9 @@ public sealed class CallGraphSnapshotTests
         Assert.True(snapshotId > 0);
         Assert.Equal(CallTreeNodeKind.Source, tree.Kind);
         Assert.Equal("Sample.EntryPoint.Run()", tree.DisplayText);
-        Assert.Contains(tree.Children, child => child.DisplayText == "Sample.Worker.Worker()");
-        Assert.Contains(tree.Children, child => child.DisplayText == "Sample.Worker.Step()");
-        Assert.Contains(tree.Children, child => child.Kind == CallTreeNodeKind.External && child.DisplayText.StartsWith("System.Console.WriteLine(", StringComparison.Ordinal));
+        Assert.Contains(tree.Children, child => child.DisplayText == "new Worker()");
+        Assert.Contains(tree.Children, child => child.DisplayText == "Step()");
+        Assert.Contains(tree.Children, child => child.Kind == CallTreeNodeKind.External && child.DisplayText == "WriteLine(\"done\": System.String)");
     }
 
     [Fact]
@@ -36,12 +36,12 @@ public sealed class CallGraphSnapshotTests
         await cache.WriteSnapshotAsync(dbPath, build);
 
         var cycleTree = await cache.ProjectTreeAsync(dbPath, "Sample.Worker.Step()");
-        var loop = FindNode(cycleTree, "Sample.Worker.Loop()");
+        var loop = FindNode(cycleTree, "Loop()");
         Assert.NotNull(loop);
-        Assert.Contains(loop!.Children, child => child.Kind == CallTreeNodeKind.Cycle && child.DisplayText == "Sample.Worker.Loop()");
+        Assert.Contains(loop!.Children, child => child.Kind == CallTreeNodeKind.Cycle && child.DisplayText == "Loop()");
 
         var truncatedTree = await cache.ProjectTreeAsync(dbPath, "Sample.EntryPoint.Run()", new AnalysisOptions(maxDepth: 1));
-        Assert.Contains(truncatedTree.Children, child => child.DisplayText == "Sample.Worker.Step()" && child.Kind == CallTreeNodeKind.Truncated);
+        Assert.Contains(truncatedTree.Children, child => child.DisplayText == "Step()" && child.Kind == CallTreeNodeKind.Truncated);
     }
 
     [Fact]
@@ -58,13 +58,40 @@ public sealed class CallGraphSnapshotTests
         Assert.Contains(localTree.Children, child => child.Kind == CallTreeNodeKind.Source && child.DisplayText.Contains("Local", StringComparison.Ordinal));
 
         var accessorTree = await cache.ProjectTreeAsync(dbPath, "Sample.AccessorUser.UseAccessors()");
-        Assert.Contains(accessorTree.Children, child => child.DisplayText == "Sample.AccessorUser.set_Value(System.Int32)");
-        Assert.Contains(accessorTree.Children, child => child.DisplayText == "Sample.AccessorUser.get_Value()");
-        Assert.Contains(accessorTree.Children, child => child.DisplayText == "Sample.AccessorUser.get_Item(System.Int32)");
-        Assert.Contains(accessorTree.Children, child => child.DisplayText == "Sample.AccessorUser.set_Item(System.Int32, System.Int32)");
+        Assert.Contains(accessorTree.Children, child => child.DisplayText == "Value");
+        Assert.Contains(accessorTree.Children, child => child.DisplayText == "this[0]");
+        Assert.Contains(accessorTree.Children, child => child.DisplayText == "this[1]");
 
         var unresolvedTree = await cache.ProjectTreeAsync(dbPath, "Sample.EntryPoint.Unresolved()");
         Assert.Contains(unresolvedTree.Children, child => child.Kind == CallTreeNodeKind.Unresolved && child.DisplayText == "MissingCall()");
+    }
+
+    [Fact]
+    public async Task ProjectTreeAsync_displays_call_site_argument_labels_for_resolved_calls()
+    {
+        using var fixture = await TestCodebase.CreateAsync();
+        var cache = new SqliteGraphCache();
+        var dbPath = Path.Combine(fixture.RootPath, "graph.db");
+
+        var build = await new CallGraphBuilder().BuildAsync(fixture.ProjectPath);
+        await cache.WriteSnapshotAsync(dbPath, build);
+
+        var tree = await cache.ProjectTreeAsync(
+            dbPath,
+            "Sample.ArgumentSource.Run(System.String, System.Threading.CancellationToken)");
+
+        Assert.Equal("Sample.ArgumentSource.Run(System.String, System.Threading.CancellationToken)", tree.DisplayText);
+        Assert.Contains(tree.Children, child => child.DisplayText == "Target(str: System.String, ct: System.Threading.CancellationToken)");
+        Assert.Contains(tree.Children, child => child.DisplayText == "Target(\"done\": System.String, CancellationToken.None: System.Threading.CancellationToken)");
+        Assert.Contains(tree.Children, child => child.DisplayText == "Named(cancellationToken: ct: System.Threading.CancellationToken, value: str: System.String)");
+        Assert.Contains(tree.Children, child => child.DisplayText == "RefOut(ref number: System.Int32, out var written: System.Int32)");
+        Assert.Contains(tree.Children, child => child.DisplayText == "In(in number: System.Int32)");
+        Assert.Contains(tree.Children, child => child.DisplayText == "Optional(str: System.String)");
+        Assert.Contains(tree.Children, child => child.DisplayText == "new Constructed(str: System.String)");
+        Assert.Contains(tree.Children, child => child.DisplayText == "new(str: System.String)");
+
+        var constructorTree = await cache.ProjectTreeAsync(dbPath, "Sample.DerivedConstructed.DerivedConstructed(System.String)");
+        Assert.Contains(constructorTree.Children, child => child.DisplayText == "base(value: System.String)");
     }
 
     [Fact]

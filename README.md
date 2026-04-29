@@ -56,8 +56,7 @@ dotnet run --project src/DotTrace.Cli --
 To create an executable output directory:
 
 ```bash
-dotnet publish src/DotTrace.Cli -c Release -o ./artifacts/dottrace
-./artifacts/dottrace/dottrace --help
+dotnet publish src/DotTrace.Cli -c Release -o ./artifacts/dottrace ./artifacts/dottrace/dottrace --help
 ```
 
 ```text

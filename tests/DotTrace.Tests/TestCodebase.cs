@@ -38,6 +38,7 @@ internal sealed class TestCodebase : IDisposable
             Path.Combine(projectDirectory, "EntryPoint.cs"),
 """
 using System;
+using System.Threading;
 
 namespace Sample;
 
@@ -113,6 +114,74 @@ public sealed class Overloads
     }
 
     public void Execute(string value)
+    {
+    }
+}
+
+public sealed class ArgumentSource
+{
+    public void Run(string str, CancellationToken ct)
+    {
+        var target = new ArgumentTarget();
+        var number = 1;
+
+        target.Target(str, ct);
+        target.Target("done", CancellationToken.None);
+        target.Named(cancellationToken: ct, value: str);
+        target.RefOut(ref number, out var written);
+        target.In(in number);
+        target.Optional(str);
+        _ = new Constructed(str);
+        Constructed implicitConstructed = new(str);
+        _ = new DerivedConstructed(str);
+
+        GC.KeepAlive(written);
+        GC.KeepAlive(implicitConstructed);
+    }
+}
+
+public sealed class ArgumentTarget
+{
+    public void Target(string value, CancellationToken cancellationToken)
+    {
+    }
+
+    public void Named(string value, CancellationToken cancellationToken)
+    {
+    }
+
+    public void RefOut(ref int input, out int output)
+    {
+        output = input;
+    }
+
+    public void In(in int input)
+    {
+    }
+
+    public void Optional(string value, int count = 10)
+    {
+    }
+}
+
+public sealed class Constructed
+{
+    public Constructed(string value)
+    {
+    }
+}
+
+public class ConstructedBase
+{
+    public ConstructedBase(string value)
+    {
+    }
+}
+
+public sealed class DerivedConstructed : ConstructedBase
+{
+    public DerivedConstructed(string value)
+        : base(value)
     {
     }
 }

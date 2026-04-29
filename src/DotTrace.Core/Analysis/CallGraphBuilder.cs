@@ -6,6 +6,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.CodeAnalysis.Operations;
 
 namespace DotTrace.Core.Analysis;
 
@@ -273,7 +274,7 @@ public sealed class CallGraphBuilder
             return declaration switch
             {
                 MethodDeclarationSyntax method => (SyntaxNode?)method.Body ?? method.ExpressionBody?.Expression,
-                ConstructorDeclarationSyntax constructor => (SyntaxNode?)constructor.Body ?? constructor.ExpressionBody?.Expression,
+                ConstructorDeclarationSyntax constructor => constructor,
                 DestructorDeclarationSyntax destructor => (SyntaxNode?)destructor.Body ?? destructor.ExpressionBody?.Expression,
                 OperatorDeclarationSyntax op => (SyntaxNode?)op.Body ?? op.ExpressionBody?.Expression,
                 ConversionOperatorDeclarationSyntax conversion => (SyntaxNode?)conversion.Body ?? conversion.ExpressionBody?.Expression,
@@ -434,25 +435,25 @@ public sealed class CallGraphBuilder
 
         public override void VisitInvocationExpression(InvocationExpressionSyntax node)
         {
-            AddMethodCall(node, node.ToString());
+            AddMethodCall(node, FormatInvocation(node));
             base.VisitInvocationExpression(node);
         }
 
         public override void VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
         {
-            AddMethodCall(node, node.ToString());
+            AddMethodCall(node, FormatObjectCreation(node));
             base.VisitObjectCreationExpression(node);
         }
 
         public override void VisitImplicitObjectCreationExpression(ImplicitObjectCreationExpressionSyntax node)
         {
-            AddMethodCall(node, node.ToString());
+            AddMethodCall(node, FormatImplicitObjectCreation(node));
             base.VisitImplicitObjectCreationExpression(node);
         }
 
         public override void VisitConstructorInitializer(ConstructorInitializerSyntax node)
         {
-            AddMethodCall(node, node.ToString());
+            AddMethodCall(node, FormatConstructorInitializer(node));
             base.VisitConstructorInitializer(node);
         }
 
@@ -486,14 +487,121 @@ public sealed class CallGraphBuilder
 
         private void AddMethodCall(SyntaxNode node, string displayText)
         {
-            var symbolInfo = semanticModel.GetSymbolInfo(node);
-            var targetSymbol = symbolInfo.Symbol as IMethodSymbol
-                ?? symbolInfo.CandidateSymbols.OfType<IMethodSymbol>().FirstOrDefault();
+            var targetSymbol = GetTargetMethod(node);
 
             Calls.Add(new CallSite(
                 targetSymbol,
-                CollapseWhitespace(displayText),
+                displayText,
                 CreateLocation(node.GetLocation())));
+        }
+
+        private IMethodSymbol? GetTargetMethod(SyntaxNode node)
+        {
+            var operation = semanticModel.GetOperation(node);
+            if (operation is IInvocationOperation invocation)
+            {
+                return invocation.TargetMethod;
+            }
+
+            if (operation is IObjectCreationOperation objectCreation)
+            {
+                return objectCreation.Constructor;
+            }
+
+            var symbolInfo = semanticModel.GetSymbolInfo(node);
+            return symbolInfo.Symbol as IMethodSymbol
+                ?? symbolInfo.CandidateSymbols.OfType<IMethodSymbol>().FirstOrDefault();
+        }
+
+        private string FormatInvocation(InvocationExpressionSyntax node)
+        {
+            var operation = semanticModel.GetOperation(node) as IInvocationOperation;
+            return $"{FormatInvocationName(node)}({FormatArguments(node.ArgumentList.Arguments, operation?.Arguments ?? ImmutableArray<IArgumentOperation>.Empty)})";
+        }
+
+        private string FormatObjectCreation(ObjectCreationExpressionSyntax node)
+        {
+            var operation = semanticModel.GetOperation(node) as IObjectCreationOperation;
+            var arguments = node.ArgumentList?.Arguments ?? default;
+            return $"new {NormalizeSyntax(node.Type)}({FormatArguments(arguments, operation?.Arguments ?? ImmutableArray<IArgumentOperation>.Empty)})";
+        }
+
+        private string FormatImplicitObjectCreation(ImplicitObjectCreationExpressionSyntax node)
+        {
+            var operation = semanticModel.GetOperation(node) as IObjectCreationOperation;
+            return $"new({FormatArguments(node.ArgumentList.Arguments, operation?.Arguments ?? ImmutableArray<IArgumentOperation>.Empty)})";
+        }
+
+        private string FormatConstructorInitializer(ConstructorInitializerSyntax node)
+        {
+            var operation = semanticModel.GetOperation(node) as IInvocationOperation;
+            return $"{node.ThisOrBaseKeyword.ValueText}({FormatArguments(node.ArgumentList.Arguments, operation?.Arguments ?? ImmutableArray<IArgumentOperation>.Empty)})";
+        }
+
+        private string FormatArguments(
+            SeparatedSyntaxList<ArgumentSyntax> arguments,
+            ImmutableArray<IArgumentOperation> operationArguments)
+        {
+            return string.Join(
+                ", ",
+                arguments.Select(argument => FormatArgument(argument, FindArgumentOperation(argument, operationArguments))));
+        }
+
+        private string FormatArgument(ArgumentSyntax syntax, IArgumentOperation? operation)
+        {
+            var builder = new StringBuilder();
+            if (syntax.NameColon is not null)
+            {
+                builder.Append(syntax.NameColon.Name.Identifier.ValueText);
+                builder.Append(": ");
+            }
+
+            if (!syntax.RefKindKeyword.IsKind(SyntaxKind.None))
+            {
+                builder.Append(syntax.RefKindKeyword.ValueText);
+                builder.Append(' ');
+            }
+
+            builder.Append(NormalizeSyntax(syntax.Expression));
+            builder.Append(": ");
+            builder.Append(FormatConvertedType(syntax, operation));
+            return builder.ToString();
+        }
+
+        private string FormatConvertedType(ArgumentSyntax syntax, IArgumentOperation? operation)
+        {
+            var typeInfo = semanticModel.GetTypeInfo(syntax.Expression);
+            var convertedType = typeInfo.ConvertedType
+                ?? operation?.Value.Type
+                ?? operation?.Parameter?.Type
+                ?? typeInfo.Type;
+
+            return convertedType is null
+                ? "unknown"
+                : SymbolFormatting.FormatType(convertedType);
+        }
+
+        private static IArgumentOperation? FindArgumentOperation(
+            ArgumentSyntax syntax,
+            ImmutableArray<IArgumentOperation> operationArguments)
+        {
+            return operationArguments.FirstOrDefault(argument => argument.Syntax.Span == syntax.Span);
+        }
+
+        private static string FormatInvocationName(InvocationExpressionSyntax node)
+        {
+            return node.Expression switch
+            {
+                MemberAccessExpressionSyntax memberAccess => NormalizeSyntax(memberAccess.Name),
+                MemberBindingExpressionSyntax memberBinding => NormalizeSyntax(memberBinding.Name),
+                SimpleNameSyntax simpleName => NormalizeSyntax(simpleName),
+                _ => NormalizeSyntax(node.Expression)
+            };
+        }
+
+        private static string NormalizeSyntax(SyntaxNode node)
+        {
+            return node.NormalizeWhitespace().ToFullString();
         }
 
         private void AddPropertyAccess(ExpressionSyntax node, string displayText)

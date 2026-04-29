@@ -548,26 +548,26 @@ public sealed class SqliteGraphCache
                     $"The symbol '{symbolSelector}' is ambiguous. Use a fully-qualified signature. Matches:{Environment.NewLine}{matches}");
             }
 
-            return BuildSourceNode(candidates[0].Id, depth: 0, callStack: new HashSet<long>());
+            return BuildSourceNode(candidates[0].Id, depth: 0, callStack: new HashSet<long>(), displayText: null);
         }
 
-        private CallTreeNode BuildSourceNode(long symbolId, int depth, ISet<long> callStack)
+        private CallTreeNode BuildSourceNode(long symbolId, int depth, ISet<long> callStack, string? displayText)
         {
             var symbol = symbols[symbolId];
 
             if (callStack.Contains(symbolId))
             {
-                return CreateNode(symbol, CallTreeNodeKind.Cycle, Array.Empty<CallTreeNode>());
+                return CreateNode(symbol, CallTreeNodeKind.Cycle, Array.Empty<CallTreeNode>(), displayText);
             }
 
             if (expanded.Contains(symbolId))
             {
-                return CreateNode(symbol, CallTreeNodeKind.Repeated, Array.Empty<CallTreeNode>());
+                return CreateNode(symbol, CallTreeNodeKind.Repeated, Array.Empty<CallTreeNode>(), displayText);
             }
 
             if (options.MaxDepth is int maxDepth && depth >= maxDepth)
             {
-                return CreateNode(symbol, CallTreeNodeKind.Truncated, Array.Empty<CallTreeNode>());
+                return CreateNode(symbol, CallTreeNodeKind.Truncated, Array.Empty<CallTreeNode>(), displayText);
             }
 
             expanded.Add(symbolId);
@@ -576,7 +576,7 @@ public sealed class SqliteGraphCache
                 ? calls.Select(call => BuildChildNode(call, depth + 1, nextStack)).ToArray()
                 : Array.Empty<CallTreeNode>();
 
-            return CreateNode(symbol, CallTreeNodeKind.Source, children);
+            return CreateNode(symbol, CallTreeNodeKind.Source, children, displayText);
         }
 
         private CallTreeNode BuildChildNode(CachedCall call, int depth, ISet<long> callStack)
@@ -594,15 +594,19 @@ public sealed class SqliteGraphCache
             var symbol = symbols[call.CalleeSymbolId.Value];
             if (symbol.OriginKind == SymbolOriginKind.External)
             {
-                return CreateNode(symbol, CallTreeNodeKind.External, Array.Empty<CallTreeNode>());
+                return CreateNode(symbol, CallTreeNodeKind.External, Array.Empty<CallTreeNode>(), call.CallText);
             }
 
-            return BuildSourceNode(symbol.Id, depth, callStack);
+            return BuildSourceNode(symbol.Id, depth, callStack, call.CallText);
         }
 
-        private static CallTreeNode CreateNode(CachedSymbol symbol, CallTreeNodeKind kind, IReadOnlyList<CallTreeNode> children)
+        private static CallTreeNode CreateNode(
+            CachedSymbol symbol,
+            CallTreeNodeKind kind,
+            IReadOnlyList<CallTreeNode> children,
+            string? displayText)
         {
-            return new CallTreeNode(symbol.StableId, symbol.SignatureText, kind, symbol.Location, children);
+            return new CallTreeNode(symbol.StableId, displayText ?? symbol.SignatureText, kind, symbol.Location, children);
         }
     }
 
