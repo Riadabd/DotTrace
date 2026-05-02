@@ -97,8 +97,45 @@ public sealed class SqliteGraphCache
         long? snapshotId = null,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(symbolSelector);
+
+        var projector = await CreateProjectorAsync(dbPath, options, snapshotId, cancellationToken);
+        return projector.ProjectCallees(symbolSelector);
+    }
+
+    public async Task<CallTreeDocument> ProjectDocumentAsync(
+        string dbPath,
+        string symbolSelector,
+        AnalysisOptions? options = null,
+        long? snapshotId = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbolSelector);
+
+        var projector = await CreateProjectorAsync(dbPath, options, snapshotId, cancellationToken);
+        return projector.ProjectDocument(symbolSelector);
+    }
+
+    private static SqliteConnection CreateConnection(string dbPath, SqliteOpenMode mode)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = mode,
+            ForeignKeys = true,
+            Pooling = false
+        };
+
+        return new SqliteConnection(builder.ToString());
+    }
+
+    private static async Task<CallTreeProjector> CreateProjectorAsync(
+        string dbPath,
+        AnalysisOptions? options,
+        long? snapshotId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
 
         var fullPath = Path.GetFullPath(dbPath);
         if (!File.Exists(fullPath))
@@ -115,21 +152,7 @@ public sealed class SqliteGraphCache
 
         var symbols = await LoadSymbolsAsync(connection, selectedSnapshotId, cancellationToken);
         var calls = await LoadCallsAsync(connection, selectedSnapshotId, cancellationToken);
-        var projector = new CallTreeProjector(symbols, calls, options ?? new AnalysisOptions());
-        return projector.Project(symbolSelector);
-    }
-
-    private static SqliteConnection CreateConnection(string dbPath, SqliteOpenMode mode)
-    {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = dbPath,
-            Mode = mode,
-            ForeignKeys = true,
-            Pooling = false
-        };
-
-        return new SqliteConnection(builder.ToString());
+        return new CallTreeProjector(symbols, calls, options ?? new AnalysisOptions());
     }
 
     private static async Task<long> InsertSnapshotAsync(
@@ -425,7 +448,7 @@ public sealed class SqliteGraphCache
         return symbols;
     }
 
-    private static async Task<IReadOnlyDictionary<long, IReadOnlyList<CachedCall>>> LoadCallsAsync(
+    private static async Task<CachedCalls> LoadCallsAsync(
         SqliteConnection connection,
         long snapshotId,
         CancellationToken cancellationToken)
@@ -441,6 +464,7 @@ public sealed class SqliteGraphCache
         command.Parameters.AddWithValue("$snapshot_id", snapshotId);
 
         var callsByCaller = new Dictionary<long, List<CachedCall>>();
+        var callsByCallee = new Dictionary<long, List<CachedCall>>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -459,11 +483,29 @@ public sealed class SqliteGraphCache
             }
 
             calls.Add(call);
+
+            if (call.CalleeSymbolId is long calleeId)
+            {
+                if (!callsByCallee.TryGetValue(calleeId, out var callerCalls))
+                {
+                    callerCalls = new List<CachedCall>();
+                    callsByCallee.Add(calleeId, callerCalls);
+                }
+
+                callerCalls.Add(call);
+            }
         }
 
-        return callsByCaller.ToDictionary(
-            pair => pair.Key,
-            pair => (IReadOnlyList<CachedCall>)pair.Value.OrderBy(call => call.Ordinal).ToArray());
+        return new CachedCalls(
+            callsByCaller.ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<CachedCall>)pair.Value.OrderBy(call => call.Ordinal).ToArray()),
+            callsByCallee.ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<CachedCall>)pair.Value
+                    .OrderBy(call => call.CallerSymbolId)
+                    .ThenBy(call => call.Ordinal)
+                    .ToArray()));
     }
 
     private static SourceLocationInfo? ReadLocation(
@@ -507,21 +549,41 @@ public sealed class SqliteGraphCache
     {
         private readonly IReadOnlyDictionary<long, CachedSymbol> symbols;
         private readonly IReadOnlyDictionary<long, IReadOnlyList<CachedCall>> callsByCaller;
+        private readonly IReadOnlyDictionary<long, IReadOnlyList<CachedCall>> callsByCallee;
         private readonly AnalysisOptions options;
-        private readonly HashSet<long> expanded = new();
 
         public CallTreeProjector(
             IReadOnlyDictionary<long, CachedSymbol> symbols,
-            IReadOnlyDictionary<long, IReadOnlyList<CachedCall>> callsByCaller,
+            CachedCalls calls,
             AnalysisOptions options)
         {
             this.symbols = symbols;
-            this.callsByCaller = callsByCaller;
+            this.callsByCaller = calls.ByCaller;
+            this.callsByCallee = calls.ByCallee;
             this.options = options;
         }
 
-        public CallTreeNode Project(string symbolSelector)
+        public CallTreeNode ProjectCallees(string symbolSelector)
         {
+            var root = ResolveRoot(symbolSelector);
+            return ProjectCallees(root);
+        }
+
+        public CallTreeDocument ProjectDocument(string symbolSelector)
+        {
+            var root = ResolveRoot(symbolSelector);
+            var selectedRoot = CreateNode(root, CallTreeNodeKind.Source, Array.Empty<CallTreeNode>(), displayText: null);
+
+            return new CallTreeDocument(
+                selectedRoot,
+                ProjectCallers(root),
+                ProjectCallees(root));
+        }
+
+        private CachedSymbol ResolveRoot(string symbolSelector)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(symbolSelector);
+
             var selector = SymbolFormatting.ParseSelector(symbolSelector);
             var candidates = symbols.Values
                 .Where(symbol => symbol.OriginKind == SymbolOriginKind.Source)
@@ -548,10 +610,35 @@ public sealed class SqliteGraphCache
                     $"The symbol '{symbolSelector}' is ambiguous. Use a fully-qualified signature. Matches:{Environment.NewLine}{matches}");
             }
 
-            return BuildSourceNode(candidates[0].Id, depth: 0, callStack: new HashSet<long>(), displayText: null);
+            return candidates[0];
         }
 
-        private CallTreeNode BuildSourceNode(long symbolId, int depth, ISet<long> callStack, string? displayText)
+        private CallTreeNode ProjectCallees(CachedSymbol root)
+        {
+            return BuildCalleeSourceNode(
+                root.Id,
+                depth: 0,
+                callStack: new HashSet<long>(),
+                displayText: null,
+                expanded: new HashSet<long>());
+        }
+
+        private CallTreeNode ProjectCallers(CachedSymbol root)
+        {
+            return BuildCallerSourceNode(
+                root.Id,
+                depth: 0,
+                callStack: new HashSet<long>(),
+                displayText: null,
+                expanded: new HashSet<long>());
+        }
+
+        private CallTreeNode BuildCalleeSourceNode(
+            long symbolId,
+            int depth,
+            ISet<long> callStack,
+            string? displayText,
+            ISet<long> expanded)
         {
             var symbol = symbols[symbolId];
 
@@ -573,13 +660,13 @@ public sealed class SqliteGraphCache
             expanded.Add(symbolId);
             var nextStack = new HashSet<long>(callStack) { symbolId };
             var children = callsByCaller.TryGetValue(symbolId, out var calls)
-                ? calls.Select(call => BuildChildNode(call, depth + 1, nextStack)).ToArray()
+                ? calls.Select(call => BuildCalleeChildNode(call, depth + 1, nextStack, expanded)).ToArray()
                 : Array.Empty<CallTreeNode>();
 
             return CreateNode(symbol, CallTreeNodeKind.Source, children, displayText);
         }
 
-        private CallTreeNode BuildChildNode(CachedCall call, int depth, ISet<long> callStack)
+        private CallTreeNode BuildCalleeChildNode(CachedCall call, int depth, ISet<long> callStack, ISet<long> expanded)
         {
             if (call.CalleeSymbolId is null)
             {
@@ -597,7 +684,55 @@ public sealed class SqliteGraphCache
                 return CreateNode(symbol, CallTreeNodeKind.External, Array.Empty<CallTreeNode>(), call.CallText);
             }
 
-            return BuildSourceNode(symbol.Id, depth, callStack, call.CallText);
+            return BuildCalleeSourceNode(symbol.Id, depth, callStack, call.CallText, expanded);
+        }
+
+        private CallTreeNode BuildCallerSourceNode(
+            long symbolId,
+            int depth,
+            ISet<long> callStack,
+            string? displayText,
+            ISet<long> expanded)
+        {
+            var symbol = symbols[symbolId];
+
+            if (callStack.Contains(symbolId))
+            {
+                return CreateNode(symbol, CallTreeNodeKind.Cycle, Array.Empty<CallTreeNode>(), displayText);
+            }
+
+            if (expanded.Contains(symbolId))
+            {
+                return CreateNode(symbol, CallTreeNodeKind.Repeated, Array.Empty<CallTreeNode>(), displayText);
+            }
+
+            if (options.MaxDepth is int maxDepth && depth >= maxDepth)
+            {
+                return CreateNode(symbol, CallTreeNodeKind.Truncated, Array.Empty<CallTreeNode>(), displayText);
+            }
+
+            expanded.Add(symbolId);
+            var nextStack = new HashSet<long>(callStack) { symbolId };
+            var children = callsByCallee.TryGetValue(symbolId, out var calls)
+                ? calls
+                    .GroupBy(call => call.CallerSymbolId)
+                    .Select(group => BuildCallerNode(group.First(), depth + 1, nextStack, expanded))
+                    .ToArray()
+                : Array.Empty<CallTreeNode>();
+
+            return CreateNode(symbol, CallTreeNodeKind.Source, children, displayText);
+        }
+
+        private CallTreeNode BuildCallerNode(CachedCall call, int depth, ISet<long> callStack, ISet<long> expanded)
+        {
+            var symbol = symbols[call.CallerSymbolId];
+
+            if (symbol.OriginKind == SymbolOriginKind.External)
+            {
+                return CreateNode(symbol, CallTreeNodeKind.External, Array.Empty<CallTreeNode>(), displayText: null);
+            }
+
+            return BuildCallerSourceNode(symbol.Id, depth, callStack, displayText: null, expanded);
         }
 
         private static CallTreeNode CreateNode(
@@ -619,6 +754,10 @@ public sealed class SqliteGraphCache
         string NormalizedSignatureText,
         SymbolOriginKind OriginKind,
         SourceLocationInfo? Location);
+
+    private sealed record CachedCalls(
+        IReadOnlyDictionary<long, IReadOnlyList<CachedCall>> ByCaller,
+        IReadOnlyDictionary<long, IReadOnlyList<CachedCall>> ByCallee);
 
     private sealed record CachedCall(
         long CallerSymbolId,

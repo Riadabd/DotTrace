@@ -128,6 +128,20 @@ internal static class ProgramEntry
             }
         });
 
+        var viewOption = new Option<string>("--view")
+        {
+            Description = "Directional method view: callees, callers, or both.",
+            DefaultValueFactory = _ => "callees"
+        };
+        viewOption.Validators.Add(result =>
+        {
+            var value = result.GetValueOrDefault<string>();
+            if (!string.IsNullOrWhiteSpace(value) && !TryParseView(value, out _))
+            {
+                result.AddError($"Unknown view '{value}'. Supported values: callees, callers, both.");
+            }
+        });
+
         var outputPathOption = new Option<string?>("--out")
         {
             Description = "Write output to a file instead of stdout."
@@ -143,12 +157,15 @@ internal static class ProgramEntry
         treeCommand.Options.Add(snapshotOption);
         treeCommand.Options.Add(maxDepthOption);
         treeCommand.Options.Add(formatOption);
+        treeCommand.Options.Add(viewOption);
         treeCommand.Options.Add(outputPathOption);
         treeCommand.Options.Add(noColorOption);
         treeCommand.SetAction(async (parseResult, cancellationToken) =>
         {
             var formatValue = parseResult.GetValue(formatOption) ?? "text";
             TryParseFormat(formatValue, out var format);
+            var viewValue = parseResult.GetValue(viewOption) ?? "callees";
+            TryParseView(viewValue, out var view);
 
             var options = new TreeOptions
             {
@@ -157,6 +174,7 @@ internal static class ProgramEntry
                 SnapshotId = parseResult.GetValue(snapshotOption),
                 MaxDepth = parseResult.GetValue(maxDepthOption),
                 Format = format,
+                View = view,
                 OutputPath = parseResult.GetValue(outputPathOption),
                 NoColor = parseResult.GetValue(noColorOption)
             };
@@ -230,13 +248,13 @@ internal static class ProgramEntry
     {
         try
         {
-            var root = await new SqliteGraphCache().ProjectTreeAsync(
+            var document = await new SqliteGraphCache().ProjectDocumentAsync(
                 options.DbPath,
                 options.Symbol,
                 new AnalysisOptions(options.MaxDepth),
                 options.SnapshotId,
                 cancellationToken);
-            var output = Render(root, options);
+            var output = Render(document, options);
 
             if (options.OutputPath is null)
             {
@@ -264,13 +282,14 @@ internal static class ProgramEntry
         }
     }
 
-    private static string Render(CallTreeNode root, TreeOptions options)
+    private static string Render(CallTreeDocument document, TreeOptions options)
     {
         return options.Format switch
         {
-            OutputFormat.Html => new HtmlTreeRenderer().RenderDocument(root),
+            OutputFormat.Html => new HtmlTreeRenderer().RenderDocument(document, options.View),
             _ => new TextTreeRenderer().Render(
-                root,
+                document,
+                options.View,
                 new RenderOptions(UseColor: !options.NoColor && options.OutputPath is null && !Console.IsOutputRedirected))
         };
     }
@@ -287,6 +306,25 @@ internal static class ProgramEntry
                 return true;
             default:
                 format = OutputFormat.Text;
+                return false;
+        }
+    }
+
+    private static bool TryParseView(string value, out CallTreeView view)
+    {
+        switch (value.ToLowerInvariant())
+        {
+            case "callees":
+                view = CallTreeView.Callees;
+                return true;
+            case "callers":
+                view = CallTreeView.Callers;
+                return true;
+            case "both":
+                view = CallTreeView.Both;
+                return true;
+            default:
+                view = CallTreeView.Callees;
                 return false;
         }
     }
@@ -326,6 +364,8 @@ internal static class ProgramEntry
         public int? MaxDepth { get; set; }
 
         public OutputFormat Format { get; set; } = OutputFormat.Text;
+
+        public CallTreeView View { get; set; } = CallTreeView.Callees;
 
         public string? OutputPath { get; set; }
 

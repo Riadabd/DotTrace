@@ -84,6 +84,29 @@ public sealed class Worker
     }
 }
 
+public sealed class RepeatedCallers
+{
+    public void Root()
+    {
+        Left();
+        Right();
+    }
+
+    public void Left()
+    {
+        Leaf();
+    }
+
+    public void Right()
+    {
+        Leaf();
+    }
+
+    public void Leaf()
+    {
+    }
+}
+
 public sealed class AccessorUser
 {
     private int value;

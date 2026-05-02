@@ -11,14 +11,53 @@ public sealed class TextTreeRenderer
 
         var renderOptions = options ?? new RenderOptions();
         var builder = new StringBuilder();
-        builder.AppendLine(FormatLabel(root, renderOptions.UseColor));
+        AppendTree(builder, root, renderOptions.UseColor);
+        return builder.ToString();
+    }
+
+    public string Render(CallTreeDocument document, CallTreeView view, RenderOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+
+        return view switch
+        {
+            CallTreeView.Callees => Render(document.CalleesTree, options),
+            CallTreeView.Callers => RenderCallers(document, options),
+            CallTreeView.Both => RenderBoth(document, options),
+            _ => throw new ArgumentOutOfRangeException(nameof(view), view, "Unsupported call tree view.")
+        };
+    }
+
+    private static string RenderCallers(CallTreeDocument document, RenderOptions? options)
+    {
+        var renderOptions = options ?? new RenderOptions();
+        var builder = new StringBuilder();
+        builder.Append("Callers of ");
+        builder.AppendLine(FormatLabel(document.SelectedRoot, renderOptions.UseColor));
+        AppendTree(builder, document.CallersTree, renderOptions.UseColor);
+        return builder.ToString();
+    }
+
+    private static string RenderBoth(CallTreeDocument document, RenderOptions? options)
+    {
+        var renderOptions = options ?? new RenderOptions();
+        var builder = new StringBuilder();
+        builder.AppendLine("Callers");
+        AppendTree(builder, document.CallersTree, renderOptions.UseColor);
+        builder.AppendLine();
+        builder.AppendLine("Callees");
+        AppendTree(builder, document.CalleesTree, renderOptions.UseColor);
+        return builder.ToString();
+    }
+
+    private static void AppendTree(StringBuilder builder, CallTreeNode root, bool useColor)
+    {
+        builder.AppendLine(FormatLabel(root, useColor));
 
         for (var i = 0; i < root.Children.Count; i++)
         {
-            AppendNode(builder, root.Children[i], prefix: string.Empty, isLast: i == root.Children.Count - 1, renderOptions.UseColor);
+            AppendNode(builder, root.Children[i], prefix: string.Empty, isLast: i == root.Children.Count - 1, useColor);
         }
-
-        return builder.ToString();
     }
 
     private static void AppendNode(StringBuilder builder, CallTreeNode node, string prefix, bool isLast, bool useColor)
@@ -75,4 +114,3 @@ public sealed class TextTreeRenderer
         return $"\u001b[{colorCode}m{value}\u001b[0m";
     }
 }
-

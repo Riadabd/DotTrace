@@ -45,6 +45,69 @@ public sealed class CallGraphSnapshotTests
     }
 
     [Fact]
+    public async Task ProjectDocumentAsync_projects_direct_and_recursive_callers()
+    {
+        using var fixture = await TestCodebase.CreateAsync();
+        var cache = new SqliteGraphCache();
+        var dbPath = Path.Combine(fixture.RootPath, "graph.db");
+
+        var build = await new CallGraphBuilder().BuildAsync(fixture.ProjectPath);
+        await cache.WriteSnapshotAsync(dbPath, build);
+
+        var stepDocument = await cache.ProjectDocumentAsync(dbPath, "Sample.Worker.Step()");
+
+        Assert.Equal("Sample.Worker.Step()", stepDocument.SelectedRoot.DisplayText);
+        var directCaller = Assert.Single(stepDocument.CallersTree.Children);
+        Assert.Equal("Sample.EntryPoint.Run()", directCaller.DisplayText);
+        Assert.NotEqual("Step()", directCaller.DisplayText);
+        Assert.NotNull(directCaller.Location);
+        Assert.EndsWith("EntryPoint.cs", directCaller.Location!.FilePath, StringComparison.Ordinal);
+
+        var loopDocument = await cache.ProjectDocumentAsync(dbPath, "Sample.Worker.Loop()");
+        var stepCaller = loopDocument.CallersTree.Children.SingleOrDefault(
+            child => child.DisplayText == "Sample.Worker.Step()");
+
+        Assert.NotNull(stepCaller);
+        Assert.Contains(
+            stepCaller!.Children,
+            child => child.DisplayText == "Sample.EntryPoint.Run()");
+    }
+
+    [Fact]
+    public async Task ProjectDocumentAsync_detects_cycle_repeated_and_max_depth_for_callers()
+    {
+        using var fixture = await TestCodebase.CreateAsync();
+        var cache = new SqliteGraphCache();
+        var dbPath = Path.Combine(fixture.RootPath, "graph.db");
+
+        var build = await new CallGraphBuilder().BuildAsync(fixture.ProjectPath);
+        await cache.WriteSnapshotAsync(dbPath, build);
+
+        var loopDocument = await cache.ProjectDocumentAsync(dbPath, "Sample.Worker.Loop()");
+        Assert.Contains(
+            loopDocument.CallersTree.Children,
+            child => child.Kind == CallTreeNodeKind.Cycle
+                && child.DisplayText == "Sample.Worker.Loop()");
+
+        var repeatedDocument = await cache.ProjectDocumentAsync(dbPath, "Sample.RepeatedCallers.Leaf()");
+        var rootCallers = repeatedDocument.CallersTree.Children
+            .SelectMany(child => child.Children)
+            .Where(child => child.DisplayText == "Sample.RepeatedCallers.Root()")
+            .ToArray();
+
+        Assert.Contains(rootCallers, child => child.Kind == CallTreeNodeKind.Source);
+        Assert.Contains(rootCallers, child => child.Kind == CallTreeNodeKind.Repeated);
+
+        var truncatedDocument = await cache.ProjectDocumentAsync(
+            dbPath,
+            "Sample.Worker.Step()",
+            new AnalysisOptions(maxDepth: 1));
+        var truncatedCaller = Assert.Single(truncatedDocument.CallersTree.Children);
+        Assert.Equal(CallTreeNodeKind.Truncated, truncatedCaller.Kind);
+        Assert.Equal("Sample.EntryPoint.Run()", truncatedCaller.DisplayText);
+    }
+
+    [Fact]
     public async Task BuildAsync_persists_local_function_accessor_and_unresolved_call_edges()
     {
         using var fixture = await TestCodebase.CreateAsync();
