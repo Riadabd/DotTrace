@@ -84,7 +84,9 @@ public sealed class CliSnapshotTests
             "--no-color");
         Assert.Equal(0, bothExitCode);
         Assert.Contains("Callers", bothOutput, StringComparison.Ordinal);
+        Assert.Contains("=> Sample.Worker.Step() [target]", bothOutput, StringComparison.Ordinal);
         Assert.Contains("Callees", bothOutput, StringComparison.Ordinal);
+        AssertOrdered(bothOutput, "Callers", "=> Sample.Worker.Step() [target]", "Callees");
 
         var (invalidExitCode, _, invalidError) = await CaptureCliAsync(
             "tree",
@@ -123,6 +125,17 @@ public sealed class CliSnapshotTests
             Console.SetOut(originalOut);
             Console.SetError(originalError);
         }
+    }
+
+    private static void AssertOrdered(string value, string first, string second, string third)
+    {
+        var firstIndex = value.IndexOf(first, StringComparison.Ordinal);
+        var secondIndex = value.IndexOf(second, StringComparison.Ordinal);
+        var thirdIndex = value.IndexOf(third, StringComparison.Ordinal);
+
+        Assert.True(firstIndex >= 0);
+        Assert.True(secondIndex > firstIndex);
+        Assert.True(thirdIndex > secondIndex);
     }
 }
 

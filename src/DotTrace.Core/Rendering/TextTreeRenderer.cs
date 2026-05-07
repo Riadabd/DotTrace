@@ -43,11 +43,30 @@ public sealed class TextTreeRenderer
         var renderOptions = options ?? new RenderOptions();
         var builder = new StringBuilder();
         builder.AppendLine("Callers");
-        AppendTree(builder, document.CallersTree, renderOptions.UseColor);
+        AppendChildrenOrEmpty(builder, document.CallersTree, "callers", renderOptions.UseColor);
+        builder.AppendLine();
+        builder.AppendLine("Target");
+        builder.AppendLine(FormatTargetLabel(document.SelectedRoot, renderOptions.UseColor));
         builder.AppendLine();
         builder.AppendLine("Callees");
-        AppendTree(builder, document.CalleesTree, renderOptions.UseColor);
+        AppendChildrenOrEmpty(builder, document.CalleesTree, "callees", renderOptions.UseColor);
         return builder.ToString();
+    }
+
+    private static void AppendChildrenOrEmpty(StringBuilder builder, CallTreeNode root, string emptyLabel, bool useColor)
+    {
+        if (root.Children.Count == 0)
+        {
+            builder.Append("(no ");
+            builder.Append(emptyLabel);
+            builder.AppendLine(" found)");
+            return;
+        }
+
+        for (var i = 0; i < root.Children.Count; i++)
+        {
+            AppendNode(builder, root.Children[i], prefix: string.Empty, isLast: i == root.Children.Count - 1, useColor);
+        }
     }
 
     private static void AppendTree(StringBuilder builder, CallTreeNode root, bool useColor)
@@ -107,6 +126,12 @@ public sealed class TextTreeRenderer
             CallTreeNodeKind.Unresolved => WrapAnsi(label, "38;5;203"),
             _ => label
         };
+    }
+
+    private static string FormatTargetLabel(CallTreeNode node, bool useColor)
+    {
+        var label = $"=> {FormatLabel(node, useColor: false)} [target]";
+        return useColor ? WrapAnsi(label, "1;38;5;33") : label;
     }
 
     private static string WrapAnsi(string value, string colorCode)

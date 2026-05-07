@@ -67,6 +67,7 @@ dottrace cache list --db <path-to-cache.db>
 dottrace tree --db <path-to-cache.db> --symbol <fully-qualified-method-signature>
   [--snapshot <id>]
   [--max-depth <n>]
+  [--view callees|callers|both]
   [--format text|html]
   [--out <path>]
   [--no-color]
@@ -192,6 +193,9 @@ ORDER BY caller.signature_text, c.ordinal;
 - External framework or package calls render as marked leaves
 - Repeated nodes and recursion render as marked leaves instead of expanding forever
 - `--max-depth` truncates deeper expansion with an explicit marker
+- `--view callees` is the default downstream call tree
+- `--view callers` renders recursive callers for the selected method
+- `--view both` renders caller paths with a duplicated highlighted target tree row and callees nested under each target; HTML includes that full view as an extra tab alongside the separate callers and callees tabs
 
 ## Call Model
 

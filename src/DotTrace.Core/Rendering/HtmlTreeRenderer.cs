@@ -25,8 +25,8 @@ public sealed class HtmlTreeRenderer
         ArgumentNullException.ThrowIfNull(document);
 
         var sections = GetSections(document, view);
-        var activeSectionId = sections.Any(section => section.Id == "callees")
-            ? "callees"
+        var activeSectionId = view == CallTreeView.Both
+            ? "full"
             : sections[0].Id;
 
         var builder = new StringBuilder();
@@ -58,6 +58,10 @@ public sealed class HtmlTreeRenderer
         builder.AppendLine("    .viewport { overflow: auto; padding: 18px 20px 24px; max-height: 78vh; }");
         builder.AppendLine("    .tree { transform: scale(var(--zoom, 1)); transform-origin: top left; width: max-content; min-width: 100%; }");
         builder.AppendLine("    .tree-line { white-space: pre; line-height: 1.55; }");
+        builder.AppendLine("    .target-panel { overflow: auto; padding: 18px 20px 24px; max-height: 78vh; }");
+        builder.AppendLine("    .target-line { font-weight: 700; }");
+        builder.AppendLine("    .target-branch { color: var(--source); }");
+        builder.AppendLine("    .kind-target { display: inline-block; color: #053f7f; background: #eaf4ff; border: 1px solid #90b8e8; border-radius: 4px; padding: 0 4px; }");
         builder.AppendLine("    .empty { color: var(--muted); }");
         builder.AppendLine("    .branch { color: var(--branch); }");
         builder.AppendLine("    .kind-source { color: var(--source); }");
@@ -114,7 +118,14 @@ public sealed class HtmlTreeRenderer
         builder.AppendLine("    <div class=\"shell\">");
         foreach (var section in sections)
         {
-            AppendPanel(builder, section, isActive: section.Id == activeSectionId);
+            if (section.IsFullView)
+            {
+                AppendTargetPanel(builder, document, isActive: section.Id == activeSectionId);
+            }
+            else
+            {
+                AppendPanel(builder, section, isActive: section.Id == activeSectionId);
+            }
         }
 
         builder.AppendLine("    </div>");
@@ -123,7 +134,7 @@ public sealed class HtmlTreeRenderer
         builder.AppendLine("    const tabs = Array.from(document.querySelectorAll('[data-tab-target]'));");
         builder.AppendLine("    const panels = Array.from(document.querySelectorAll('[data-tab-panel]'));");
         builder.AppendLine("    const clamp = value => Math.min(2.5, Math.max(0.4, value));");
-        builder.AppendLine("    const activePanel = () => panels.find(panel => !panel.hidden);");
+        builder.AppendLine("    const activePanel = () => panels.find(panel => !panel.hidden) || document.querySelector('.target-panel[data-zoom]');");
         builder.AppendLine("    const setZoom = (panel, value) => {");
         builder.AppendLine("      const zoom = clamp(value);");
         builder.AppendLine("      panel.dataset.zoom = zoom.toFixed(2);");
@@ -168,7 +179,8 @@ public sealed class HtmlTreeRenderer
             CallTreeView.Both =>
             [
                 new TreeSection("callers", "Callers", document.CallersTree),
-                new TreeSection("callees", "Callees", document.CalleesTree)
+                new TreeSection("callees", "Callees", document.CalleesTree),
+                new TreeSection("full", "Full", document.SelectedRoot, IsFullView: true)
             ],
             _ => throw new ArgumentOutOfRangeException(nameof(view), view, "Unsupported call tree view.")
         };
@@ -211,6 +223,107 @@ public sealed class HtmlTreeRenderer
         builder.AppendLine("      </section>");
     }
 
+    private static void AppendTargetPanel(StringBuilder builder, CallTreeDocument document, bool isActive)
+    {
+        builder.Append("      <section id=\"panel-full\" class=\"tab-panel target-panel\" role=\"tabpanel\" aria-labelledby=\"tab-full\" data-tab-panel=\"full\" data-zoom=\"1\" style=\"--zoom: 1\"");
+        if (!isActive)
+        {
+            builder.Append(" hidden");
+        }
+
+        builder.AppendLine(">");
+        builder.AppendLine("        <div class=\"tree\">");
+        AppendFullTree(builder, document);
+        builder.AppendLine("        </div>");
+        builder.AppendLine("      </section>");
+    }
+
+    private static void AppendFullTree(StringBuilder builder, CallTreeDocument document)
+    {
+        var callerPaths = GetCallerPaths(document.CallersTree.Children);
+        if (callerPaths.Count == 0)
+        {
+            AppendTargetWithCallees(builder, prefix: string.Empty, document);
+            return;
+        }
+
+        for (var i = 0; i < callerPaths.Count; i++)
+        {
+            AppendCallerPath(builder, callerPaths[i], isLast: i == callerPaths.Count - 1, document);
+        }
+    }
+
+    private static IReadOnlyList<IReadOnlyList<CallTreeNode>> GetCallerPaths(IReadOnlyList<CallTreeNode> callers)
+    {
+        var paths = new List<IReadOnlyList<CallTreeNode>>();
+        foreach (var caller in callers)
+        {
+            AddCallerPaths(caller, new List<CallTreeNode>(), paths);
+        }
+
+        return paths;
+    }
+
+    private static void AddCallerPaths(
+        CallTreeNode node,
+        List<CallTreeNode> path,
+        List<IReadOnlyList<CallTreeNode>> paths)
+    {
+        path.Add(node);
+        if (node.Children.Count == 0)
+        {
+            paths.Add(path.AsEnumerable().Reverse().ToArray());
+        }
+        else
+        {
+            foreach (var child in node.Children)
+            {
+                AddCallerPaths(child, path, paths);
+            }
+        }
+
+        path.RemoveAt(path.Count - 1);
+    }
+
+    private static void AppendCallerPath(
+        StringBuilder builder,
+        IReadOnlyList<CallTreeNode> path,
+        bool isLast,
+        CallTreeDocument document)
+    {
+        var prefix = string.Empty;
+        for (var i = 0; i < path.Count; i++)
+        {
+            var isLastAtLevel = i == 0 ? isLast : true;
+            WriteTreeLine(builder, prefix, isLastAtLevel ? "└── " : "├── ", path[i]);
+            prefix += isLastAtLevel ? "    " : "│   ";
+        }
+
+        AppendTargetWithCallees(builder, prefix, document);
+    }
+
+    private static void AppendTargetWithCallees(StringBuilder builder, string prefix, CallTreeDocument document)
+    {
+        WriteTargetLine(builder, prefix, document.SelectedRoot);
+
+        var targetChildPrefix = prefix + "    ";
+        if (document.CalleesTree.Children.Count > 0)
+        {
+            for (var i = 0; i < document.CalleesTree.Children.Count; i++)
+            {
+                AppendNode(
+                    builder,
+                    targetChildPrefix,
+                    document.CalleesTree.Children[i],
+                    isLast: i == document.CalleesTree.Children.Count - 1);
+            }
+        }
+        else
+        {
+            WriteTreeLine(builder, targetChildPrefix, branch: "└── ", label: "No callees found", labelClass: "empty");
+        }
+    }
+
     private static void AppendNode(StringBuilder builder, string prefix, CallTreeNode node, bool isLast)
     {
         var branch = isLast ? "└── " : "├── ";
@@ -223,18 +336,35 @@ public sealed class HtmlTreeRenderer
         }
     }
 
-    private readonly record struct TreeSection(string Id, string Label, CallTreeNode Tree);
+    private readonly record struct TreeSection(string Id, string Label, CallTreeNode Tree, bool IsFullView = false);
 
     private static void WriteTreeLine(StringBuilder builder, string prefix, string branch, CallTreeNode node)
+    {
+        WriteTreeLine(builder, prefix, branch, FormatLabel(node), GetKindClass(node.Kind));
+    }
+
+    private static void WriteTreeLine(StringBuilder builder, string prefix, string branch, string label, string labelClass)
     {
         builder.Append("          <div class=\"tree-line\">");
         builder.Append("<span class=\"branch\">");
         builder.Append(WebUtility.HtmlEncode(prefix + branch));
         builder.Append("</span>");
         builder.Append("<span class=\"");
-        builder.Append(GetKindClass(node.Kind));
+        builder.Append(labelClass);
         builder.Append("\">");
-        builder.Append(WebUtility.HtmlEncode(FormatLabel(node)));
+        builder.Append(WebUtility.HtmlEncode(label));
+        builder.Append("</span>");
+        builder.AppendLine("</div>");
+    }
+
+    private static void WriteTargetLine(StringBuilder builder, string prefix, CallTreeNode target)
+    {
+        builder.Append("          <div class=\"tree-line target-line\">");
+        builder.Append("<span class=\"branch target-branch\">");
+        builder.Append(WebUtility.HtmlEncode(prefix + "╞══ "));
+        builder.Append("</span>");
+        builder.Append("<span class=\"kind-target\">");
+        builder.Append(WebUtility.HtmlEncode($"{FormatLabel(target)} [target]"));
         builder.Append("</span>");
         builder.AppendLine("</div>");
     }
