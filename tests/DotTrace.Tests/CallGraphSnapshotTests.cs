@@ -74,6 +74,35 @@ public sealed class CallGraphSnapshotTests
     }
 
     [Fact]
+    public async Task Search_get_and_project_by_symbol_id_use_snapshot_scoped_source_symbols()
+    {
+        using var fixture = await TestCodebase.CreateAsync();
+        var cache = new SqliteGraphCache();
+        var dbPath = Path.Combine(fixture.RootPath, "graph.db");
+
+        var build = await new CallGraphBuilder().BuildAsync(fixture.ProjectPath);
+        var snapshotId = await cache.WriteSnapshotAsync(dbPath, build);
+
+        var matches = await cache.SearchSymbolsAsync(dbPath, "Worker.Step", snapshotId);
+        var match = Assert.Single(matches);
+
+        Assert.Equal(snapshotId, match.SnapshotId);
+        Assert.Equal("Sample.Worker.Step()", match.SignatureText);
+        Assert.Equal(SymbolOriginKind.Source, match.OriginKind);
+        Assert.Equal(1, match.DirectCallerCount);
+        Assert.Equal(1, match.DirectCalleeCount);
+        Assert.NotNull(match.Location);
+
+        var detail = await cache.GetSymbolAsync(dbPath, match.Id, snapshotId);
+        Assert.Equal(match, detail);
+
+        var document = await cache.ProjectDocumentBySymbolIdAsync(dbPath, match.Id, snapshotId: snapshotId);
+        Assert.Equal("Sample.Worker.Step()", document.SelectedRoot.DisplayText);
+        Assert.Contains(document.CallersTree.Children, child => child.DisplayText == "Sample.EntryPoint.Run()");
+        Assert.Contains(document.CalleesTree.Children, child => child.DisplayText == "Loop()");
+    }
+
+    [Fact]
     public async Task ProjectDocumentAsync_detects_cycle_repeated_and_max_depth_for_callers()
     {
         using var fixture = await TestCodebase.CreateAsync();

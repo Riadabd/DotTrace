@@ -31,6 +31,7 @@ nix develop
 dotnet restore
 dotnet build
 dotnet run --project src/DotTrace.Cli -- cache build ./YourSolution.sln --db trace.db
+dotnet run --project src/DotTrace.Cli -- serve --db trace.db
 dotnet run --project src/DotTrace.Cli -- tree --db trace.db \
   --symbol 'Your.Namespace.EntryPoint.Run(System.String[])' \
   --format text
@@ -64,6 +65,11 @@ dottrace cache build <path-to-sln-or-csproj> --db <path-to-cache.db>
 
 dottrace cache list --db <path-to-cache.db>
 
+dottrace serve --db <path-to-cache.db>
+  [--snapshot <id>]
+  [--port <n>]
+  [--max-depth <n>]
+
 dottrace tree --db <path-to-cache.db> --symbol <fully-qualified-method-signature>
   [--snapshot <id>]
   [--max-depth <n>]
@@ -77,6 +83,16 @@ Example root symbols:
 
 - `MyCompany.App.Program.Main(System.String[])`
 - `MyCompany.Core.OrderService.Submit(MyCompany.Core.OrderRequest)`
+
+## Browser Explorer
+
+`serve` hosts a read-only browser UI for humans who want to explore the SQLite cache without writing SQL:
+
+```bash
+dottrace serve --db trace.db
+```
+
+The command binds to `127.0.0.1`, chooses an available port unless `--port` is supplied, and prints the URL. The UI lets you select a snapshot, search source methods, inspect the selected method metadata, and render callers, callees, or both from the cache.
 
 Quote `--symbol` values in zsh, bash, and similar shells because method signatures contain parentheses:
 

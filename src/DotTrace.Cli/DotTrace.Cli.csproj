@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="Microsoft.Build.Framework" ExcludeAssets="runtime">
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>

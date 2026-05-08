@@ -11,7 +11,7 @@ Console.OutputEncoding = Encoding.UTF8;
 var exitCode = await ProgramEntry.RunAsync(args);
 return exitCode;
 
-internal static class ProgramEntry
+internal static partial class ProgramEntry
 {
     public static Task<int> RunAsync(string[] args)
     {
@@ -23,6 +23,7 @@ internal static class ProgramEntry
         var rootCommand = new RootCommand("Roslyn-powered static call-tree explorer for C# solutions and projects.");
         rootCommand.Subcommands.Add(CreateCacheCommand());
         rootCommand.Subcommands.Add(CreateTreeCommand());
+        rootCommand.Subcommands.Add(CreateServeCommand());
         rootCommand.SetAction(parseResult => new HelpAction().Invoke(parseResult));
         return rootCommand;
     }

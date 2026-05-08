@@ -116,6 +116,163 @@ public sealed class SqliteGraphCache
         return projector.ProjectDocument(symbolSelector);
     }
 
+    public async Task<CallTreeDocument> ProjectDocumentBySymbolIdAsync(
+        string dbPath,
+        long symbolId,
+        AnalysisOptions? options = null,
+        long? snapshotId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (symbolId <= 0)
+        {
+            throw new DotTraceException("Symbol id must be a positive integer.");
+        }
+
+        var projector = await CreateProjectorAsync(dbPath, options, snapshotId, cancellationToken);
+        return projector.ProjectDocument(symbolId);
+    }
+
+    public async Task<IReadOnlyList<CallGraphSymbolInfo>> SearchSymbolsAsync(
+        string dbPath,
+        string? query = null,
+        long? snapshotId = null,
+        int page = 1,
+        int pageSize = 50,
+        CancellationToken cancellationToken = default)
+    {
+        if (page <= 0)
+        {
+            throw new DotTraceException("Page must be a positive integer.");
+        }
+
+        if (pageSize <= 0)
+        {
+            throw new DotTraceException("Page size must be a positive integer.");
+        }
+
+        pageSize = Math.Min(pageSize, 200);
+
+        await using var connection = await OpenReadOnlyValidatedAsync(dbPath, cancellationToken);
+        var selectedSnapshotId = await ResolveSnapshotIdAsync(connection, snapshotId, cancellationToken);
+        var searchText = query?.Trim();
+        var offset = (long)(page - 1) * pageSize;
+
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT
+              s.id,
+              s.snapshot_id,
+              s.qualified_name,
+              s.signature_text,
+              s.origin_kind,
+              p.name,
+              p.assembly_name,
+              p.file_path,
+              s.file_path,
+              s.line,
+              s.column,
+              (
+                SELECT COUNT(DISTINCT incoming.caller_symbol_id)
+                FROM calls AS incoming
+                WHERE incoming.snapshot_id = s.snapshot_id
+                  AND incoming.callee_symbol_id = s.id
+              ) AS direct_caller_count,
+              (
+                SELECT COUNT(*)
+                FROM calls AS outgoing
+                WHERE outgoing.snapshot_id = s.snapshot_id
+                  AND outgoing.caller_symbol_id = s.id
+              ) AS direct_callee_count
+            FROM symbols AS s
+            LEFT JOIN projects AS p
+              ON p.snapshot_id = s.snapshot_id
+             AND p.id = s.project_id
+            WHERE s.snapshot_id = $snapshot_id
+              AND s.origin_kind = 'source'
+              AND (
+                $query IS NULL
+                OR s.qualified_name LIKE $query ESCAPE '\'
+                OR s.signature_text LIKE $query ESCAPE '\'
+              )
+            ORDER BY s.qualified_name, s.signature_text, s.id
+            LIMIT $limit OFFSET $offset;
+            """;
+        command.Parameters.AddWithValue("$snapshot_id", selectedSnapshotId);
+        command.Parameters.AddWithValue("$query", string.IsNullOrWhiteSpace(searchText) ? DBNull.Value : $"%{EscapeLike(searchText)}%");
+        command.Parameters.AddWithValue("$limit", pageSize);
+        command.Parameters.AddWithValue("$offset", offset);
+
+        var symbols = new List<CallGraphSymbolInfo>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            symbols.Add(ReadSymbolInfo(reader));
+        }
+
+        return symbols;
+    }
+
+    public async Task<CallGraphSymbolInfo> GetSymbolAsync(
+        string dbPath,
+        long symbolId,
+        long? snapshotId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (symbolId <= 0)
+        {
+            throw new DotTraceException("Symbol id must be a positive integer.");
+        }
+
+        await using var connection = await OpenReadOnlyValidatedAsync(dbPath, cancellationToken);
+        var selectedSnapshotId = await ResolveSnapshotIdAsync(connection, snapshotId, cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT
+              s.id,
+              s.snapshot_id,
+              s.qualified_name,
+              s.signature_text,
+              s.origin_kind,
+              p.name,
+              p.assembly_name,
+              p.file_path,
+              s.file_path,
+              s.line,
+              s.column,
+              (
+                SELECT COUNT(DISTINCT incoming.caller_symbol_id)
+                FROM calls AS incoming
+                WHERE incoming.snapshot_id = s.snapshot_id
+                  AND incoming.callee_symbol_id = s.id
+              ) AS direct_caller_count,
+              (
+                SELECT COUNT(*)
+                FROM calls AS outgoing
+                WHERE outgoing.snapshot_id = s.snapshot_id
+                  AND outgoing.caller_symbol_id = s.id
+              ) AS direct_callee_count
+            FROM symbols AS s
+            LEFT JOIN projects AS p
+              ON p.snapshot_id = s.snapshot_id
+             AND p.id = s.project_id
+            WHERE s.snapshot_id = $snapshot_id
+              AND s.id = $symbol_id;
+            """;
+        command.Parameters.AddWithValue("$snapshot_id", selectedSnapshotId);
+        command.Parameters.AddWithValue("$symbol_id", symbolId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new DotTraceException($"SQLite cache symbol {symbolId} does not exist in snapshot {selectedSnapshotId}.");
+        }
+
+        return ReadSymbolInfo(reader);
+    }
+
     private static SqliteConnection CreateConnection(string dbPath, SqliteOpenMode mode)
     {
         var builder = new SqliteConnectionStringBuilder
@@ -129,10 +286,8 @@ public sealed class SqliteGraphCache
         return new SqliteConnection(builder.ToString());
     }
 
-    private static async Task<CallTreeProjector> CreateProjectorAsync(
+    private static async Task<SqliteConnection> OpenReadOnlyValidatedAsync(
         string dbPath,
-        AnalysisOptions? options,
-        long? snapshotId,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
@@ -143,16 +298,37 @@ public sealed class SqliteGraphCache
             throw new DotTraceException($"SQLite cache does not exist: {fullPath}");
         }
 
-        await using var connection = CreateConnection(fullPath, SqliteOpenMode.ReadOnly);
+        var connection = CreateConnection(fullPath, SqliteOpenMode.ReadOnly);
         await connection.OpenAsync(cancellationToken);
         await SqliteSchema.ValidateAsync(connection, cancellationToken);
+        return connection;
+    }
 
-        var selectedSnapshotId = snapshotId ?? await GetActiveSnapshotIdAsync(connection, cancellationToken);
+    private static async Task<CallTreeProjector> CreateProjectorAsync(
+        string dbPath,
+        AnalysisOptions? options,
+        long? snapshotId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dbPath);
+
+        await using var connection = await OpenReadOnlyValidatedAsync(dbPath, cancellationToken);
+        var selectedSnapshotId = await ResolveSnapshotIdAsync(connection, snapshotId, cancellationToken);
         await EnsureSnapshotExistsAsync(connection, selectedSnapshotId, cancellationToken);
 
         var symbols = await LoadSymbolsAsync(connection, selectedSnapshotId, cancellationToken);
         var calls = await LoadCallsAsync(connection, selectedSnapshotId, cancellationToken);
         return new CallTreeProjector(symbols, calls, options ?? new AnalysisOptions());
+    }
+
+    private static async Task<long> ResolveSnapshotIdAsync(
+        SqliteConnection connection,
+        long? snapshotId,
+        CancellationToken cancellationToken)
+    {
+        var selectedSnapshotId = snapshotId ?? await GetActiveSnapshotIdAsync(connection, cancellationToken);
+        await EnsureSnapshotExistsAsync(connection, selectedSnapshotId, cancellationToken);
+        return selectedSnapshotId;
     }
 
     private static async Task<long> InsertSnapshotAsync(
@@ -525,6 +701,30 @@ public sealed class SqliteGraphCache
             reader.GetInt32(columnOrdinal));
     }
 
+    private static CallGraphSymbolInfo ReadSymbolInfo(SqliteDataReader reader)
+    {
+        return new CallGraphSymbolInfo(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            FromDatabaseValue(reader.GetString(4)),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            ReadLocation(reader, filePathOrdinal: 8, lineOrdinal: 9, columnOrdinal: 10),
+            reader.GetInt64(11),
+            reader.GetInt64(12));
+    }
+
+    private static string EscapeLike(string value)
+    {
+        return value
+            .Replace(@"\", @"\\", StringComparison.Ordinal)
+            .Replace("%", @"\%", StringComparison.Ordinal)
+            .Replace("_", @"\_", StringComparison.Ordinal);
+    }
+
     private static string ToDatabaseValue(SymbolOriginKind kind)
     {
         return kind switch
@@ -580,6 +780,17 @@ public sealed class SqliteGraphCache
                 ProjectCallees(root));
         }
 
+        public CallTreeDocument ProjectDocument(long symbolId)
+        {
+            var root = ResolveRoot(symbolId);
+            var selectedRoot = CreateNode(root, CallTreeNodeKind.Source, Array.Empty<CallTreeNode>(), displayText: null);
+
+            return new CallTreeDocument(
+                selectedRoot,
+                ProjectCallers(root),
+                ProjectCallees(root));
+        }
+
         private CachedSymbol ResolveRoot(string symbolSelector)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(symbolSelector);
@@ -611,6 +822,21 @@ public sealed class SqliteGraphCache
             }
 
             return candidates[0];
+        }
+
+        private CachedSymbol ResolveRoot(long symbolId)
+        {
+            if (!symbols.TryGetValue(symbolId, out var symbol))
+            {
+                throw new DotTraceException($"SQLite cache symbol {symbolId} does not exist in the selected snapshot.");
+            }
+
+            if (symbol.OriginKind != SymbolOriginKind.Source)
+            {
+                throw new DotTraceException($"SQLite cache symbol {symbolId} is external. Only source symbols can be rendered as tree roots.");
+            }
+
+            return symbol;
         }
 
         private CallTreeNode ProjectCallees(CachedSymbol root)
