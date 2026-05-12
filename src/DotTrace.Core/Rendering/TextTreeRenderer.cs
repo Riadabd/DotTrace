@@ -102,8 +102,10 @@ public sealed class TextTreeRenderer
     {
         var label = node.Kind switch
         {
+            CallTreeNodeKind.Group => node.DisplayText,
             CallTreeNodeKind.Source => node.DisplayText,
             CallTreeNodeKind.External => $"{node.DisplayText} [external]",
+            CallTreeNodeKind.Boundary => $"{node.DisplayText} [boundary]",
             CallTreeNodeKind.Cycle => $"{node.DisplayText} [cycle]",
             CallTreeNodeKind.Repeated => $"{node.DisplayText} [seen]",
             CallTreeNodeKind.Truncated => $"{node.DisplayText} [max-depth]",
@@ -118,8 +120,10 @@ public sealed class TextTreeRenderer
 
         return node.Kind switch
         {
+            CallTreeNodeKind.Group => WrapAnsi(label, "1"),
             CallTreeNodeKind.Source => WrapAnsi(label, "38;5;33"),
             CallTreeNodeKind.External => WrapAnsi(label, "38;5;214"),
+            CallTreeNodeKind.Boundary => WrapAnsi(label, "38;5;208"),
             CallTreeNodeKind.Cycle => WrapAnsi(label, "38;5;198"),
             CallTreeNodeKind.Repeated => WrapAnsi(label, "38;5;141"),
             CallTreeNodeKind.Truncated => WrapAnsi(label, "38;5;220"),

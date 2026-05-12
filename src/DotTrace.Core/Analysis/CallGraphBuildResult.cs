@@ -9,4 +9,5 @@ public sealed record CallGraphBuildResult(
     IReadOnlyList<CallGraphProject> Projects,
     IReadOnlyList<CallGraphSymbol> Symbols,
     IReadOnlyList<CallGraphCall> Calls,
+    IReadOnlyList<CallGraphRootSymbol> RootSymbols,
     ImmutableArray<string> Diagnostics);

@@ -157,6 +157,21 @@ internal static class BrowserServer
             });
         });
 
+        app.MapGet("/api/projects", async (
+            long? snapshot,
+            CancellationToken cancellationToken) =>
+        {
+            return await HandleAsync(async () =>
+            {
+                var projects = await cache.ListProjectsAsync(
+                    dbPath,
+                    snapshot ?? options.InitialSnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(projects);
+            });
+        });
+
         app.MapGet("/api/tree", async (
             long symbolId,
             long? snapshot,
@@ -180,6 +195,35 @@ internal static class BrowserServer
                     cancellationToken);
 
                 return Results.Ok(new BrowserTreeResponse(selectedView, document));
+            });
+        });
+
+        app.MapGet("/api/map", async (
+            long projectId,
+            long? snapshot,
+            int? maxDepth,
+            CancellationToken cancellationToken) =>
+        {
+            return await HandleAsync(async () =>
+            {
+                if (projectId <= 0)
+                {
+                    throw new DotTraceException("projectId must be a positive integer.");
+                }
+
+                if (maxDepth is <= 0)
+                {
+                    throw new DotTraceException("maxDepth must be a positive integer.");
+                }
+
+                var map = await cache.ProjectMapAsync(
+                    dbPath,
+                    projectId,
+                    new AnalysisOptions(maxDepth ?? options.InitialMaxDepth),
+                    snapshot ?? options.InitialSnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(new BrowserMapResponse(map));
             });
         });
     }
@@ -235,4 +279,6 @@ internal static class BrowserServer
     }
 
     private sealed record BrowserTreeResponse(CallTreeView View, CallTreeDocument Document);
+
+    private sealed record BrowserMapResponse(CallTreeNode Map);
 }

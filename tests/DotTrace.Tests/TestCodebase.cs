@@ -4,15 +4,18 @@ namespace DotTrace.Tests;
 
 internal sealed class TestCodebase : IDisposable
 {
-    private TestCodebase(string rootPath, string projectPath)
+    private TestCodebase(string rootPath, string projectPath, string? libraryProjectPath = null)
     {
         RootPath = rootPath;
         ProjectPath = projectPath;
+        LibraryProjectPath = libraryProjectPath;
     }
 
     public string RootPath { get; }
 
     public string ProjectPath { get; }
+
+    public string? LibraryProjectPath { get; }
 
     public static async Task<TestCodebase> CreateAsync()
     {
@@ -205,6 +208,168 @@ public sealed class DerivedConstructed : ConstructedBase
 {
     public DerivedConstructed(string value)
         : base(value)
+    {
+    }
+}
+""");
+
+        await RestoreAsync(projectPath);
+        return new TestCodebase(rootPath, projectPath);
+    }
+
+    public static async Task<TestCodebase> CreateMapAsync()
+    {
+        var rootPath = Path.Combine(Path.GetTempPath(), "dottrace-tests", Guid.NewGuid().ToString("N"));
+        var appDirectory = Path.Combine(rootPath, "Sample.App");
+        var libraryDirectory = Path.Combine(rootPath, "Sample.Library");
+
+        Directory.CreateDirectory(appDirectory);
+        Directory.CreateDirectory(libraryDirectory);
+
+        var libraryProjectPath = Path.Combine(libraryDirectory, "Sample.Library.csproj");
+        await File.WriteAllTextAsync(
+            libraryProjectPath,
+"""
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+""");
+
+        await File.WriteAllTextAsync(
+            Path.Combine(libraryDirectory, "LibraryWorker.cs"),
+"""
+namespace Sample.Library;
+
+public sealed class LibraryWorker
+{
+    public void Work()
+    {
+    }
+}
+
+public sealed class LibraryRoot
+{
+    public void Start()
+    {
+        new LibraryWorker().Work();
+    }
+}
+""");
+
+        var appProjectPath = Path.Combine(appDirectory, "Sample.App.csproj");
+        await File.WriteAllTextAsync(
+            appProjectPath,
+"""
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Sample.Library\Sample.Library.csproj" />
+  </ItemGroup>
+</Project>
+""");
+
+        await File.WriteAllTextAsync(
+            Path.Combine(appDirectory, "Program.cs"),
+"""
+using Microsoft.AspNetCore.Mvc;
+using Sample.Library;
+
+namespace Sample.App;
+
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        new AppRunner().Run();
+    }
+}
+
+[ApiController]
+[Route("api/[controller]")]
+public sealed class ItemsController : ControllerBase
+{
+    [HttpGet]
+    public string Get()
+    {
+        return new AppRunner().ControllerPath();
+    }
+}
+
+public sealed class AppRunner
+{
+    public void Run()
+    {
+        new LibraryWorker().Work();
+    }
+
+    public string ControllerPath()
+    {
+        return "ok";
+    }
+}
+
+public sealed class Island
+{
+    public void A()
+    {
+        B();
+    }
+
+    public void B()
+    {
+        A();
+    }
+}
+""");
+
+        await RestoreAsync(appProjectPath);
+        return new TestCodebase(rootPath, appProjectPath, libraryProjectPath);
+    }
+
+    public static async Task<TestCodebase> CreateTopLevelProgramAsync()
+    {
+        var rootPath = Path.Combine(Path.GetTempPath(), "dottrace-tests", Guid.NewGuid().ToString("N"));
+        var projectDirectory = Path.Combine(rootPath, "Sample.TopLevel");
+
+        Directory.CreateDirectory(projectDirectory);
+
+        var projectPath = Path.Combine(projectDirectory, "Sample.TopLevel.csproj");
+        await File.WriteAllTextAsync(
+            projectPath,
+"""
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+""");
+
+        await File.WriteAllTextAsync(
+            Path.Combine(projectDirectory, "Program.cs"),
+"""
+new AppRunner().Run();
+
+public sealed class AppRunner
+{
+    public void Run()
+    {
+        Leaf();
+    }
+
+    public void Leaf()
     {
     }
 }

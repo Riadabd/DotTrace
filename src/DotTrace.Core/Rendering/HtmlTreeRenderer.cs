@@ -20,7 +20,30 @@ public sealed class HtmlTreeRenderer
         return RenderDocument(document, CallTreeView.Callees);
     }
 
+    public string RenderMap(CallTreeNode root)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+
+        var selectedRoot = new CallTreeNode(
+            root.Id,
+            root.DisplayText,
+            root.Kind,
+            root.Location,
+            Array.Empty<CallTreeNode>());
+        var document = new CallTreeDocument(selectedRoot, selectedRoot, root);
+        return RenderDocument(document, CallTreeView.Callees, "DotTrace Codebase Map", "Project map");
+    }
+
     public string RenderDocument(CallTreeDocument document, CallTreeView view = CallTreeView.Callees)
+    {
+        return RenderDocument(document, view, "DotTrace Call Tree", "Selected method");
+    }
+
+    private string RenderDocument(
+        CallTreeDocument document,
+        CallTreeView view,
+        string title,
+        string selectedLabel)
     {
         ArgumentNullException.ThrowIfNull(document);
 
@@ -37,7 +60,7 @@ public sealed class HtmlTreeRenderer
         builder.AppendLine("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />");
         builder.AppendLine("  <title>DotTrace</title>");
         builder.AppendLine("  <style>");
-        builder.AppendLine("    :root { --bg: #f5f7fa; --panel: #ffffff; --ink: #18202a; --muted: #647084; --border: #d8dee8; --branch: #6b7280; --source: #0b5cad; --external: #b45f06; --cycle: #b4235a; --repeated: #6d4bc2; --truncated: #8a6400; --unresolved: #c22f24; }");
+        builder.AppendLine("    :root { --bg: #f5f7fa; --panel: #ffffff; --ink: #18202a; --muted: #647084; --border: #d8dee8; --branch: #6b7280; --group: #253244; --source: #0b5cad; --external: #b45f06; --boundary: #c05621; --cycle: #b4235a; --repeated: #6d4bc2; --truncated: #8a6400; --unresolved: #c22f24; }");
         builder.AppendLine("    * { box-sizing: border-box; }");
         builder.AppendLine("    body { margin: 0; font-family: \"Iosevka Web\", \"SFMono-Regular\", Consolas, monospace; color: var(--ink); background: var(--bg); min-height: 100vh; }");
         builder.AppendLine("    .page { max-width: 1280px; margin: 0 auto; padding: 20px; }");
@@ -64,8 +87,10 @@ public sealed class HtmlTreeRenderer
         builder.AppendLine("    .kind-target { display: inline-block; color: #053f7f; background: #eaf4ff; border: 1px solid #90b8e8; border-radius: 4px; padding: 0 4px; }");
         builder.AppendLine("    .empty { color: var(--muted); }");
         builder.AppendLine("    .branch { color: var(--branch); }");
+        builder.AppendLine("    .kind-group { color: var(--group); font-weight: 700; }");
         builder.AppendLine("    .kind-source { color: var(--source); }");
         builder.AppendLine("    .kind-external { color: var(--external); }");
+        builder.AppendLine("    .kind-boundary { color: var(--boundary); }");
         builder.AppendLine("    .kind-cycle { color: var(--cycle); }");
         builder.AppendLine("    .kind-repeated { color: var(--repeated); }");
         builder.AppendLine("    .kind-truncated { color: var(--truncated); }");
@@ -76,8 +101,12 @@ public sealed class HtmlTreeRenderer
         builder.AppendLine("  <div class=\"page\">");
         builder.AppendLine("    <header class=\"header\">");
         builder.AppendLine("      <div>");
-        builder.AppendLine("        <h1>DotTrace Call Tree</h1>");
-        builder.Append("        <p class=\"selected-method\"><span>Selected method</span> ");
+        builder.Append("        <h1>");
+        builder.Append(WebUtility.HtmlEncode(title));
+        builder.AppendLine("</h1>");
+        builder.Append("        <p class=\"selected-method\"><span>");
+        builder.Append(WebUtility.HtmlEncode(selectedLabel));
+        builder.Append("</span> ");
         builder.Append(WebUtility.HtmlEncode(document.SelectedRoot.DisplayText));
         builder.AppendLine("</p>");
         builder.AppendLine("      </div>");
@@ -90,6 +119,7 @@ public sealed class HtmlTreeRenderer
         builder.AppendLine("    <ul class=\"legend\">");
         builder.AppendLine("      <li><span class=\"kind-source\">source</span></li>");
         builder.AppendLine("      <li><span class=\"kind-external\">external</span></li>");
+        builder.AppendLine("      <li><span class=\"kind-boundary\">boundary</span></li>");
         builder.AppendLine("      <li><span class=\"kind-cycle\">cycle</span></li>");
         builder.AppendLine("      <li><span class=\"kind-repeated\">seen</span></li>");
         builder.AppendLine("      <li><span class=\"kind-truncated\">max-depth</span></li>");
@@ -373,8 +403,10 @@ public sealed class HtmlTreeRenderer
     {
         return node.Kind switch
         {
+            CallTreeNodeKind.Group => node.DisplayText,
             CallTreeNodeKind.Source => node.DisplayText,
             CallTreeNodeKind.External => $"{node.DisplayText} [external]",
+            CallTreeNodeKind.Boundary => $"{node.DisplayText} [boundary]",
             CallTreeNodeKind.Cycle => $"{node.DisplayText} [cycle]",
             CallTreeNodeKind.Repeated => $"{node.DisplayText} [seen]",
             CallTreeNodeKind.Truncated => $"{node.DisplayText} [max-depth]",
@@ -387,8 +419,10 @@ public sealed class HtmlTreeRenderer
     {
         return kind switch
         {
+            CallTreeNodeKind.Group => "kind-group",
             CallTreeNodeKind.Source => "kind-source",
             CallTreeNodeKind.External => "kind-external",
+            CallTreeNodeKind.Boundary => "kind-boundary",
             CallTreeNodeKind.Cycle => "kind-cycle",
             CallTreeNodeKind.Repeated => "kind-repeated",
             CallTreeNodeKind.Truncated => "kind-truncated",

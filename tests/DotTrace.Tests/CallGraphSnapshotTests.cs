@@ -103,6 +103,74 @@ public sealed class CallGraphSnapshotTests
     }
 
     [Fact]
+    public async Task ProjectMapAsync_uses_discovered_roots_and_selected_project_boundary()
+    {
+        using var fixture = await TestCodebase.CreateMapAsync();
+        var cache = new SqliteGraphCache();
+        var dbPath = Path.Combine(fixture.RootPath, "graph.db");
+
+        var build = await new CallGraphBuilder().BuildAsync(fixture.ProjectPath);
+        await cache.WriteSnapshotAsync(dbPath, build);
+
+        var projects = await cache.ListProjectsAsync(dbPath);
+        var appProject = projects.Single(project => project.Name == "Sample.App");
+        var libraryProject = projects.Single(project => project.Name == "Sample.Library");
+
+        Assert.Equal(2, appProject.RootSymbolCount);
+        Assert.Equal(0, libraryProject.RootSymbolCount);
+
+        var appMap = await cache.ProjectMapAsync(dbPath, appProject.Id);
+
+        Assert.Equal(CallTreeNodeKind.Group, appMap.Kind);
+        Assert.Equal("Map: Sample.App", appMap.DisplayText);
+        Assert.Contains(appMap.Children, child => child.DisplayText == "Compiler entry points");
+        Assert.Contains(appMap.Children, child => child.DisplayText == "ASP.NET controller actions");
+        Assert.Contains(appMap.Children, child => child.DisplayText == "Remaining source islands");
+        Assert.NotNull(FindNode(appMap, "Sample.App.Program.Main(System.String[])"));
+        Assert.NotNull(FindNode(appMap, "Sample.App.ItemsController.Get()"));
+
+        var workBoundary = FindNode(appMap, "Work()");
+        Assert.NotNull(workBoundary);
+        Assert.Equal(CallTreeNodeKind.Boundary, workBoundary!.Kind);
+
+        var island = FindNode(appMap, "Sample.App.Island.A()");
+        Assert.NotNull(island);
+        Assert.Contains(island!.Children, child => child.DisplayText == "B()");
+
+        var libraryMap = await cache.ProjectMapAsync(dbPath, libraryProject.Id);
+        Assert.Contains(libraryMap.Children, child => child.DisplayText == "Graph roots");
+        Assert.NotNull(FindNode(libraryMap, "Sample.Library.LibraryRoot.Start()"));
+    }
+
+    [Fact]
+    public async Task ProjectMapAsync_uses_top_level_statements_as_compiler_entry_point()
+    {
+        using var fixture = await TestCodebase.CreateTopLevelProgramAsync();
+        var cache = new SqliteGraphCache();
+        var dbPath = Path.Combine(fixture.RootPath, "graph.db");
+
+        var build = await new CallGraphBuilder().BuildAsync(fixture.ProjectPath);
+        await cache.WriteSnapshotAsync(dbPath, build);
+
+        Assert.DoesNotContain(
+            build.Diagnostics,
+            diagnostic => diagnostic.Contains("Skipped compiler entry point root", StringComparison.Ordinal));
+        var root = Assert.Single(build.RootSymbols, root => root.Kind == RootSymbolKind.CompilerEntryPoint);
+        var rootSymbol = Assert.Single(build.Symbols, symbol => symbol.StableId == root.SymbolStableId);
+        Assert.Equal("Program.<Main>$(System.String[])", rootSymbol.SignatureText);
+
+        var project = Assert.Single(await cache.ListProjectsAsync(dbPath));
+        Assert.Equal(1, project.RootSymbolCount);
+
+        var map = await cache.ProjectMapAsync(dbPath, project.Id);
+        var compilerRoots = Assert.Single(map.Children, child => child.DisplayText == "Compiler entry points");
+        var entryPoint = Assert.Single(compilerRoots.Children);
+
+        Assert.Equal("Program.<Main>$(System.String[])", entryPoint.DisplayText);
+        Assert.Contains(entryPoint.Children, child => child.DisplayText == "Run()");
+    }
+
+    [Fact]
     public async Task ProjectDocumentAsync_detects_cycle_repeated_and_max_depth_for_callers()
     {
         using var fixture = await TestCodebase.CreateAsync();

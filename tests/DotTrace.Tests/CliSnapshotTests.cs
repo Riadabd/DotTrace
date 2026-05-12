@@ -100,6 +100,55 @@ public sealed class CliSnapshotTests
         Assert.Contains("Unknown view 'sideways'", invalidError, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Cli_map_renders_project_scoped_text_and_html()
+    {
+        using var fixture = await TestCodebase.CreateMapAsync();
+        var dbPath = Path.Combine(fixture.RootPath, "graph.db");
+        var htmlPath = Path.Combine(fixture.RootPath, "map.html");
+
+        var buildExitCode = await RunCliAsync("cache", "build", fixture.ProjectPath, "--db", dbPath);
+        Assert.Equal(0, buildExitCode);
+
+        var (missingProjectExitCode, _, missingProjectError) = await CaptureCliAsync(
+            "map",
+            "--db",
+            dbPath,
+            "--no-color");
+        Assert.NotEqual(0, missingProjectExitCode);
+        Assert.Contains("--project is required", missingProjectError, StringComparison.Ordinal);
+        Assert.Contains("Sample.App", missingProjectError, StringComparison.Ordinal);
+
+        var (textExitCode, textOutput, _) = await CaptureCliAsync(
+            "map",
+            "--db",
+            dbPath,
+            "--project",
+            "Sample.App",
+            "--no-color");
+        Assert.Equal(0, textExitCode);
+        Assert.Contains("Map: Sample.App", textOutput, StringComparison.Ordinal);
+        Assert.Contains("Compiler entry points", textOutput, StringComparison.Ordinal);
+        Assert.Contains("ASP.NET controller actions", textOutput, StringComparison.Ordinal);
+        Assert.Contains("Work() [boundary]", textOutput, StringComparison.Ordinal);
+
+        var htmlExitCode = await RunCliAsync(
+            "map",
+            "--db",
+            dbPath,
+            "--project",
+            "Sample.App",
+            "--format",
+            "html",
+            "--out",
+            htmlPath);
+        Assert.Equal(0, htmlExitCode);
+
+        var html = await File.ReadAllTextAsync(htmlPath);
+        Assert.Contains("DotTrace Codebase Map", html, StringComparison.Ordinal);
+        Assert.Contains("Map: Sample.App", html, StringComparison.Ordinal);
+    }
+
     private static async Task<int> RunCliAsync(params string[] args)
     {
         var (exitCode, _, _) = await CaptureCliAsync(args);

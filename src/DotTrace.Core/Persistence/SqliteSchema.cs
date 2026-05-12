@@ -5,7 +5,7 @@ namespace DotTrace.Core.Persistence;
 
 internal static class SqliteSchema
 {
-    public const int CurrentVersion = 1;
+    public const int CurrentVersion = 2;
 
     public static async Task EnsureCreatedAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
@@ -68,6 +68,18 @@ internal static class SqliteSchema
               FOREIGN KEY (snapshot_id, callee_symbol_id) REFERENCES symbols(snapshot_id, id)
             );
 
+            CREATE TABLE IF NOT EXISTS root_symbols (
+              id INTEGER PRIMARY KEY,
+              snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+              project_id INTEGER NOT NULL,
+              symbol_id INTEGER NOT NULL,
+              kind TEXT NOT NULL,
+              metadata_json TEXT,
+              FOREIGN KEY (snapshot_id, project_id) REFERENCES projects(snapshot_id, id),
+              FOREIGN KEY (snapshot_id, symbol_id) REFERENCES symbols(snapshot_id, id),
+              UNIQUE (snapshot_id, project_id, symbol_id, kind)
+            );
+
             CREATE TABLE IF NOT EXISTS diagnostics (
               id INTEGER PRIMARY KEY,
               snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
@@ -91,6 +103,9 @@ internal static class SqliteSchema
 
             CREATE INDEX IF NOT EXISTS ix_calls_snapshot_callee
               ON calls(snapshot_id, callee_symbol_id);
+
+            CREATE INDEX IF NOT EXISTS ix_root_symbols_snapshot_project_kind
+              ON root_symbols(snapshot_id, project_id, kind, symbol_id);
             """,
             cancellationToken);
 

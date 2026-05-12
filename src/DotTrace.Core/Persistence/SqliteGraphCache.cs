@@ -31,6 +31,7 @@ public sealed class SqliteGraphCache
             var snapshotId = await InsertSnapshotAsync(connection, transaction, buildResult, cancellationToken);
             var projectIds = await InsertProjectsAsync(connection, transaction, snapshotId, buildResult.Projects, cancellationToken);
             var symbolIds = await InsertSymbolsAsync(connection, transaction, snapshotId, buildResult.Symbols, projectIds, cancellationToken);
+            await InsertRootSymbolsAsync(connection, transaction, snapshotId, buildResult.RootSymbols, projectIds, symbolIds, cancellationToken);
             await InsertCallsAsync(connection, transaction, snapshotId, buildResult.Calls, symbolIds, cancellationToken);
             await InsertDiagnosticsAsync(connection, transaction, snapshotId, buildResult.Diagnostics, cancellationToken);
             await SetActiveSnapshotAsync(connection, transaction, snapshotId, cancellationToken);
@@ -90,6 +91,69 @@ public sealed class SqliteGraphCache
         return snapshots;
     }
 
+    public async Task<IReadOnlyList<CallGraphProjectInfo>> ListProjectsAsync(
+        string dbPath,
+        long? snapshotId = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenReadOnlyValidatedAsync(dbPath, cancellationToken);
+        var selectedSnapshotId = await ResolveSnapshotIdAsync(connection, snapshotId, cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT
+              p.id,
+              p.snapshot_id,
+              p.name,
+              p.assembly_name,
+              p.file_path,
+              (
+                SELECT COUNT(*)
+                FROM symbols AS s
+                WHERE s.snapshot_id = p.snapshot_id
+                  AND s.project_id = p.id
+                  AND s.origin_kind = 'source'
+              ) AS source_symbol_count,
+              (
+                SELECT COUNT(*)
+                FROM root_symbols AS r
+                WHERE r.snapshot_id = p.snapshot_id
+                  AND r.project_id = p.id
+              ) AS root_symbol_count,
+              (
+                SELECT COUNT(*)
+                FROM calls AS c
+                JOIN symbols AS caller
+                  ON caller.snapshot_id = c.snapshot_id
+                 AND caller.id = c.caller_symbol_id
+                WHERE c.snapshot_id = p.snapshot_id
+                  AND caller.project_id = p.id
+              ) AS direct_call_count
+            FROM projects AS p
+            WHERE p.snapshot_id = $snapshot_id
+            ORDER BY p.name, p.assembly_name, p.file_path, p.id;
+            """;
+        command.Parameters.AddWithValue("$snapshot_id", selectedSnapshotId);
+
+        var projects = new List<CallGraphProjectInfo>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            projects.Add(new CallGraphProjectInfo(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetInt64(5),
+                reader.GetInt64(6),
+                reader.GetInt64(7)));
+        }
+
+        return projects;
+    }
+
     public async Task<CallTreeNode> ProjectTreeAsync(
         string dbPath,
         string symbolSelector,
@@ -130,6 +194,22 @@ public sealed class SqliteGraphCache
 
         var projector = await CreateProjectorAsync(dbPath, options, snapshotId, cancellationToken);
         return projector.ProjectDocument(symbolId);
+    }
+
+    public async Task<CallTreeNode> ProjectMapAsync(
+        string dbPath,
+        long projectId,
+        AnalysisOptions? options = null,
+        long? snapshotId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (projectId <= 0)
+        {
+            throw new DotTraceException("Project id must be a positive integer.");
+        }
+
+        var projector = await CreateProjectorAsync(dbPath, options, snapshotId, cancellationToken);
+        return projector.ProjectMap(projectId);
     }
 
     public async Task<IReadOnlyList<CallGraphSymbolInfo>> SearchSymbolsAsync(
@@ -316,9 +396,11 @@ public sealed class SqliteGraphCache
         var selectedSnapshotId = await ResolveSnapshotIdAsync(connection, snapshotId, cancellationToken);
         await EnsureSnapshotExistsAsync(connection, selectedSnapshotId, cancellationToken);
 
+        var projects = await LoadProjectsForProjectionAsync(connection, selectedSnapshotId, cancellationToken);
         var symbols = await LoadSymbolsAsync(connection, selectedSnapshotId, cancellationToken);
         var calls = await LoadCallsAsync(connection, selectedSnapshotId, cancellationToken);
-        return new CallTreeProjector(symbols, calls, options ?? new AnalysisOptions());
+        var rootSymbols = await LoadRootSymbolsAsync(connection, selectedSnapshotId, cancellationToken);
+        return new CallTreeProjector(projects, symbols, calls, rootSymbols, options ?? new AnalysisOptions());
     }
 
     private static async Task<long> ResolveSnapshotIdAsync(
@@ -463,6 +545,49 @@ public sealed class SqliteGraphCache
         return symbolIds;
     }
 
+    private static async Task InsertRootSymbolsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long snapshotId,
+        IReadOnlyList<CallGraphRootSymbol> rootSymbols,
+        IReadOnlyDictionary<string, long> projectIds,
+        IReadOnlyDictionary<string, long> symbolIds,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            INSERT INTO root_symbols(
+              snapshot_id,
+              project_id,
+              symbol_id,
+              kind,
+              metadata_json)
+            VALUES (
+              $snapshot_id,
+              $project_id,
+              $symbol_id,
+              $kind,
+              $metadata_json);
+            """;
+        var snapshotParameter = command.Parameters.Add("$snapshot_id", SqliteType.Integer);
+        var projectParameter = command.Parameters.Add("$project_id", SqliteType.Integer);
+        var symbolParameter = command.Parameters.Add("$symbol_id", SqliteType.Integer);
+        var kindParameter = command.Parameters.Add("$kind", SqliteType.Text);
+        var metadataParameter = command.Parameters.Add("$metadata_json", SqliteType.Text);
+
+        foreach (var rootSymbol in rootSymbols)
+        {
+            snapshotParameter.Value = snapshotId;
+            projectParameter.Value = projectIds[rootSymbol.ProjectStableId];
+            symbolParameter.Value = symbolIds[rootSymbol.SymbolStableId];
+            kindParameter.Value = ToDatabaseValue(rootSymbol.Kind);
+            metadataParameter.Value = rootSymbol.MetadataJson is null ? DBNull.Value : rootSymbol.MetadataJson;
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
     private static async Task InsertCallsAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -596,7 +721,7 @@ public sealed class SqliteGraphCache
         await using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT id, stable_id, qualified_name, signature_text, normalized_qualified_name, normalized_signature_text, origin_kind, file_path, line, column
+            SELECT id, project_id, stable_id, qualified_name, signature_text, normalized_qualified_name, normalized_signature_text, origin_kind, file_path, line, column
             FROM symbols
             WHERE snapshot_id = $snapshot_id
             ORDER BY id;
@@ -612,16 +737,79 @@ public sealed class SqliteGraphCache
                 id,
                 new CachedSymbol(
                     id,
-                    reader.GetString(1),
+                    reader.IsDBNull(1) ? null : reader.GetInt64(1),
                     reader.GetString(2),
                     reader.GetString(3),
                     reader.GetString(4),
                     reader.GetString(5),
-                    FromDatabaseValue(reader.GetString(6)),
-                    ReadLocation(reader, filePathOrdinal: 7, lineOrdinal: 8, columnOrdinal: 9)));
+                    reader.GetString(6),
+                    FromDatabaseValue(reader.GetString(7)),
+                    ReadLocation(reader, filePathOrdinal: 8, lineOrdinal: 9, columnOrdinal: 10)));
         }
 
         return symbols;
+    }
+
+    private static async Task<Dictionary<long, CachedProject>> LoadProjectsForProjectionAsync(
+        SqliteConnection connection,
+        long snapshotId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, stable_id, name, assembly_name, file_path
+            FROM projects
+            WHERE snapshot_id = $snapshot_id
+            ORDER BY id;
+            """;
+        command.Parameters.AddWithValue("$snapshot_id", snapshotId);
+
+        var projects = new Dictionary<long, CachedProject>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var id = reader.GetInt64(0);
+            projects.Add(
+                id,
+                new CachedProject(
+                    id,
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    reader.GetString(4)));
+        }
+
+        return projects;
+    }
+
+    private static async Task<IReadOnlyList<CachedRootSymbol>> LoadRootSymbolsAsync(
+        SqliteConnection connection,
+        long snapshotId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT project_id, symbol_id, kind, metadata_json
+            FROM root_symbols
+            WHERE snapshot_id = $snapshot_id
+            ORDER BY project_id, kind, symbol_id;
+            """;
+        command.Parameters.AddWithValue("$snapshot_id", snapshotId);
+
+        var rootSymbols = new List<CachedRootSymbol>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rootSymbols.Add(new CachedRootSymbol(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                FromRootKindDatabaseValue(reader.GetString(2)),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
+        }
+
+        return rootSymbols;
     }
 
     private static async Task<CachedCalls> LoadCallsAsync(
@@ -735,6 +923,16 @@ public sealed class SqliteGraphCache
         };
     }
 
+    private static string ToDatabaseValue(RootSymbolKind kind)
+    {
+        return kind switch
+        {
+            RootSymbolKind.CompilerEntryPoint => "compiler-entry-point",
+            RootSymbolKind.AspNetControllerAction => "aspnet-controller-action",
+            _ => throw new DotTraceException($"Unsupported root symbol kind '{kind}'.")
+        };
+    }
+
     private static SymbolOriginKind FromDatabaseValue(string value)
     {
         return value switch
@@ -745,21 +943,37 @@ public sealed class SqliteGraphCache
         };
     }
 
+    private static RootSymbolKind FromRootKindDatabaseValue(string value)
+    {
+        return value switch
+        {
+            "compiler-entry-point" => RootSymbolKind.CompilerEntryPoint,
+            "aspnet-controller-action" => RootSymbolKind.AspNetControllerAction,
+            _ => throw new DotTraceException($"Unsupported root symbol kind '{value}'.")
+        };
+    }
+
     private sealed class CallTreeProjector
     {
+        private readonly IReadOnlyDictionary<long, CachedProject> projects;
         private readonly IReadOnlyDictionary<long, CachedSymbol> symbols;
         private readonly IReadOnlyDictionary<long, IReadOnlyList<CachedCall>> callsByCaller;
         private readonly IReadOnlyDictionary<long, IReadOnlyList<CachedCall>> callsByCallee;
+        private readonly IReadOnlyList<CachedRootSymbol> rootSymbols;
         private readonly AnalysisOptions options;
 
         public CallTreeProjector(
+            IReadOnlyDictionary<long, CachedProject> projects,
             IReadOnlyDictionary<long, CachedSymbol> symbols,
             CachedCalls calls,
+            IReadOnlyList<CachedRootSymbol> rootSymbols,
             AnalysisOptions options)
         {
+            this.projects = projects;
             this.symbols = symbols;
             this.callsByCaller = calls.ByCaller;
             this.callsByCallee = calls.ByCallee;
+            this.rootSymbols = rootSymbols;
             this.options = options;
         }
 
@@ -789,6 +1003,67 @@ public sealed class SqliteGraphCache
                 selectedRoot,
                 ProjectCallers(root),
                 ProjectCallees(root));
+        }
+
+        public CallTreeNode ProjectMap(long projectId)
+        {
+            if (!projects.TryGetValue(projectId, out var project))
+            {
+                throw new DotTraceException($"SQLite cache project {projectId} does not exist in the selected snapshot.");
+            }
+
+            var inScopeSourceSymbols = symbols.Values
+                .Where(symbol => symbol.OriginKind == SymbolOriginKind.Source && symbol.ProjectId == projectId)
+                .OrderBy(symbol => symbol.QualifiedName, StringComparer.Ordinal)
+                .ThenBy(symbol => symbol.SignatureText, StringComparer.Ordinal)
+                .ThenBy(symbol => symbol.Id)
+                .ToArray();
+            var inScopeSourceIds = inScopeSourceSymbols.Select(symbol => symbol.Id).ToHashSet();
+            var explicitRoots = rootSymbols
+                .Where(root => root.ProjectId == projectId && inScopeSourceIds.Contains(root.SymbolId))
+                .OrderBy(root => GetRootPriority(root.Kind))
+                .ThenBy(root => symbols[root.SymbolId].QualifiedName, StringComparer.Ordinal)
+                .ThenBy(root => symbols[root.SymbolId].SignatureText, StringComparer.Ordinal)
+                .ThenBy(root => root.SymbolId)
+                .ToArray();
+            var explicitRootIds = explicitRoots.Select(root => root.SymbolId).ToHashSet();
+            var expanded = new HashSet<long>();
+            var groups = new List<CallTreeNode>();
+
+            AddRootGroup(
+                groups,
+                "compiler-entry-points",
+                "Compiler entry points",
+                explicitRoots.Where(root => root.Kind == RootSymbolKind.CompilerEntryPoint).Select(root => root.SymbolId),
+                projectId,
+                expanded);
+            AddRootGroup(
+                groups,
+                "aspnet-controller-actions",
+                "ASP.NET controller actions",
+                explicitRoots.Where(root => root.Kind == RootSymbolKind.AspNetControllerAction).Select(root => root.SymbolId),
+                projectId,
+                expanded);
+
+            var graphRootIds = inScopeSourceSymbols
+                .Where(symbol => !explicitRootIds.Contains(symbol.Id))
+                .Where(symbol => !HasInScopeCaller(symbol.Id, projectId))
+                .Select(symbol => symbol.Id)
+                .ToArray();
+            AddRootGroup(groups, "graph-roots", "Graph roots", graphRootIds, projectId, expanded);
+
+            var remainingRootIds = inScopeSourceSymbols
+                .Where(symbol => !expanded.Contains(symbol.Id))
+                .Select(symbol => symbol.Id)
+                .ToArray();
+            AddRootGroup(groups, "remaining-source-islands", "Remaining source islands", remainingRootIds, projectId, expanded);
+
+            return new CallTreeNode(
+                $"project::{project.StableId}",
+                $"Map: {project.Name}",
+                CallTreeNodeKind.Group,
+                null,
+                groups);
         }
 
         private CachedSymbol ResolveRoot(string symbolSelector)
@@ -846,7 +1121,8 @@ public sealed class SqliteGraphCache
                 depth: 0,
                 callStack: new HashSet<long>(),
                 displayText: null,
-                expanded: new HashSet<long>());
+                expanded: new HashSet<long>(),
+                scopeProjectId: null);
         }
 
         private CallTreeNode ProjectCallers(CachedSymbol root)
@@ -859,12 +1135,62 @@ public sealed class SqliteGraphCache
                 expanded: new HashSet<long>());
         }
 
+        private void AddRootGroup(
+            ICollection<CallTreeNode> groups,
+            string id,
+            string label,
+            IEnumerable<long> rootIds,
+            long projectId,
+            ISet<long> expanded)
+        {
+            var children = rootIds
+                .Distinct()
+                .Select(rootId => BuildCalleeSourceNode(
+                    rootId,
+                    depth: 0,
+                    callStack: new HashSet<long>(),
+                    displayText: null,
+                    expanded,
+                    projectId))
+                .ToArray();
+            if (children.Length == 0)
+            {
+                return;
+            }
+
+            groups.Add(new CallTreeNode(
+                id,
+                label,
+                CallTreeNodeKind.Group,
+                null,
+                children));
+        }
+
+        private bool HasInScopeCaller(long symbolId, long projectId)
+        {
+            return callsByCallee.TryGetValue(symbolId, out var incoming) &&
+                incoming.Any(call =>
+                    symbols.TryGetValue(call.CallerSymbolId, out var caller) &&
+                    caller.ProjectId == projectId);
+        }
+
+        private static int GetRootPriority(RootSymbolKind kind)
+        {
+            return kind switch
+            {
+                RootSymbolKind.CompilerEntryPoint => 0,
+                RootSymbolKind.AspNetControllerAction => 1,
+                _ => 99
+            };
+        }
+
         private CallTreeNode BuildCalleeSourceNode(
             long symbolId,
             int depth,
             ISet<long> callStack,
             string? displayText,
-            ISet<long> expanded)
+            ISet<long> expanded,
+            long? scopeProjectId)
         {
             var symbol = symbols[symbolId];
 
@@ -886,13 +1212,18 @@ public sealed class SqliteGraphCache
             expanded.Add(symbolId);
             var nextStack = new HashSet<long>(callStack) { symbolId };
             var children = callsByCaller.TryGetValue(symbolId, out var calls)
-                ? calls.Select(call => BuildCalleeChildNode(call, depth + 1, nextStack, expanded)).ToArray()
+                ? calls.Select(call => BuildCalleeChildNode(call, depth + 1, nextStack, expanded, scopeProjectId)).ToArray()
                 : Array.Empty<CallTreeNode>();
 
             return CreateNode(symbol, CallTreeNodeKind.Source, children, displayText);
         }
 
-        private CallTreeNode BuildCalleeChildNode(CachedCall call, int depth, ISet<long> callStack, ISet<long> expanded)
+        private CallTreeNode BuildCalleeChildNode(
+            CachedCall call,
+            int depth,
+            ISet<long> callStack,
+            ISet<long> expanded,
+            long? scopeProjectId)
         {
             if (call.CalleeSymbolId is null)
             {
@@ -910,7 +1241,12 @@ public sealed class SqliteGraphCache
                 return CreateNode(symbol, CallTreeNodeKind.External, Array.Empty<CallTreeNode>(), call.CallText);
             }
 
-            return BuildCalleeSourceNode(symbol.Id, depth, callStack, call.CallText, expanded);
+            if (scopeProjectId is not null && symbol.ProjectId != scopeProjectId)
+            {
+                return CreateNode(symbol, CallTreeNodeKind.Boundary, Array.Empty<CallTreeNode>(), call.CallText);
+            }
+
+            return BuildCalleeSourceNode(symbol.Id, depth, callStack, call.CallText, expanded, scopeProjectId);
         }
 
         private CallTreeNode BuildCallerSourceNode(
@@ -973,6 +1309,7 @@ public sealed class SqliteGraphCache
 
     private sealed record CachedSymbol(
         long Id,
+        long? ProjectId,
         string StableId,
         string QualifiedName,
         string SignatureText,
@@ -980,6 +1317,19 @@ public sealed class SqliteGraphCache
         string NormalizedSignatureText,
         SymbolOriginKind OriginKind,
         SourceLocationInfo? Location);
+
+    private sealed record CachedProject(
+        long Id,
+        string StableId,
+        string Name,
+        string AssemblyName,
+        string FilePath);
+
+    private sealed record CachedRootSymbol(
+        long ProjectId,
+        long SymbolId,
+        RootSymbolKind Kind,
+        string? MetadataJson);
 
     private sealed record CachedCalls(
         IReadOnlyDictionary<long, IReadOnlyList<CachedCall>> ByCaller,

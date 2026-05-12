@@ -23,6 +23,8 @@ public sealed class BrowserServerTests
         var html = await client.GetStringAsync("/");
         Assert.Contains("DotTrace Explorer", html, StringComparison.Ordinal);
         Assert.Contains("symbolSearch", html, StringComparison.Ordinal);
+        Assert.Contains("projectSelect", html, StringComparison.Ordinal);
+        Assert.Contains("renderMap", html, StringComparison.Ordinal);
 
         using var snapshotsDocument = await GetJsonAsync(client, "/api/snapshots");
         var snapshots = snapshotsDocument.RootElement;
@@ -40,6 +42,16 @@ public sealed class BrowserServerTests
 
         using var detailDocument = await GetJsonAsync(client, $"/api/symbols/{symbolId}?snapshot={snapshotId}");
         Assert.Equal("Sample.Worker.Step()", detailDocument.RootElement.GetProperty("signatureText").GetString());
+
+        using var projectsDocument = await GetJsonAsync(client, $"/api/projects?snapshot={snapshotId}");
+        var project = Assert.Single(projectsDocument.RootElement.EnumerateArray());
+        var projectId = project.GetProperty("id").GetInt64();
+        Assert.Equal("Sample.App", project.GetProperty("name").GetString());
+
+        using var mapDocument = await GetJsonAsync(
+            client,
+            $"/api/map?snapshot={snapshotId}&projectId={projectId}&maxDepth=3");
+        Assert.Equal("Map: Sample.App", mapDocument.RootElement.GetProperty("map").GetProperty("displayText").GetString());
 
         using var treeDocument = await GetJsonAsync(
             client,

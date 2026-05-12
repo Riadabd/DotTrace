@@ -61,6 +61,8 @@ public sealed class CallGraphBuilder
         private readonly Dictionary<string, SourceMethodBody> sourceBodiesByStableId = new(StringComparer.Ordinal);
         private readonly Dictionary<ISymbol, string> sourceStableIdsBySymbol = new(SymbolEqualityComparer.Default);
         private readonly Dictionary<string, SemanticModel> semanticModelsByDocumentId = new(StringComparer.Ordinal);
+        private readonly List<CallGraphRootSymbol> rootSymbols = new();
+        private readonly HashSet<string> rootSymbolKeys = new(StringComparer.Ordinal);
 
         public WorkspaceGraphBuilder(
             Solution solution,
@@ -81,6 +83,12 @@ public sealed class CallGraphBuilder
                 await CollectSourceSymbolsAsync(project, cancellationToken);
             }
 
+            foreach (var project in solution.Projects.OrderBy(project => project.FilePath ?? project.Name, StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await CollectCompilerEntryPointAsync(project, cancellationToken);
+            }
+
             var calls = new List<CallGraphCall>();
             foreach (var body in sourceBodiesByStableId.Values.OrderBy(body => body.Symbol.StableId, StringComparer.Ordinal))
             {
@@ -96,6 +104,11 @@ public sealed class CallGraphBuilder
                 projectsByStableId.Values.OrderBy(project => project.StableId, StringComparer.Ordinal).ToArray(),
                 symbolsByStableId.Values.OrderBy(symbol => symbol.StableId, StringComparer.Ordinal).ToArray(),
                 calls,
+                rootSymbols
+                    .OrderBy(root => root.ProjectStableId, StringComparer.Ordinal)
+                    .ThenBy(root => root.Kind)
+                    .ThenBy(root => root.SymbolStableId, StringComparer.Ordinal)
+                    .ToArray(),
                 diagnostics.ToImmutable());
         }
 
@@ -143,14 +156,102 @@ public sealed class CallGraphBuilder
                     }
 
                     var normalizedMethod = methodSymbol.OriginalDefinition;
-                    var stableId = CreateStableId(normalizedMethod, project);
-                    sourceStableIdsBySymbol[normalizedMethod] = stableId;
-
-                    var symbol = CreateGraphSymbol(normalizedMethod, project, SymbolOriginKind.Source);
-                    symbolsByStableId.TryAdd(stableId, symbol);
-                    sourceBodiesByStableId.TryAdd(stableId, new SourceMethodBody(symbol, executableNode, semanticModel));
+                    AddSourceMethod(normalizedMethod, project, executableNode, semanticModel);
+                    if (IsAspNetControllerAction(normalizedMethod))
+                    {
+                        AddRootSymbol(normalizedMethod, project, RootSymbolKind.AspNetControllerAction, metadataJson: null);
+                    }
                 }
             }
+        }
+
+        private async Task CollectCompilerEntryPointAsync(Project project, CancellationToken cancellationToken)
+        {
+            var compilation = await project.GetCompilationAsync(cancellationToken);
+            var entryPoint = compilation?.GetEntryPoint(cancellationToken);
+            if (entryPoint is null)
+            {
+                return;
+            }
+
+            await CaptureTopLevelEntryPointAsync(project, entryPoint.OriginalDefinition, cancellationToken);
+            AddRootSymbol(entryPoint.OriginalDefinition, project, RootSymbolKind.CompilerEntryPoint, metadataJson: null);
+        }
+
+        private async Task CaptureTopLevelEntryPointAsync(
+            Project project,
+            IMethodSymbol entryPoint,
+            CancellationToken cancellationToken)
+        {
+            var normalizedEntryPoint = entryPoint.OriginalDefinition;
+            if (sourceStableIdsBySymbol.ContainsKey(normalizedEntryPoint))
+            {
+                return;
+            }
+
+            foreach (var document in project.Documents.OrderBy(document => document.FilePath ?? document.Name, StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (await document.GetSyntaxRootAsync(cancellationToken) is not CompilationUnitSyntax compilationUnit ||
+                    !compilationUnit.Members.Any(member => member is GlobalStatementSyntax))
+                {
+                    continue;
+                }
+
+                var semanticModel = await GetSemanticModelAsync(document, cancellationToken);
+                AddSourceMethod(normalizedEntryPoint, project, compilationUnit, semanticModel);
+                return;
+            }
+        }
+
+        private void AddSourceMethod(
+            IMethodSymbol method,
+            Project project,
+            SyntaxNode executableNode,
+            SemanticModel semanticModel)
+        {
+            var normalizedMethod = method.OriginalDefinition;
+            var stableId = CreateStableId(normalizedMethod, project);
+            sourceStableIdsBySymbol[normalizedMethod] = stableId;
+
+            var symbol = CreateGraphSymbol(normalizedMethod, project, SymbolOriginKind.Source);
+            symbolsByStableId.TryAdd(stableId, symbol);
+            sourceBodiesByStableId.TryAdd(stableId, new SourceMethodBody(symbol, executableNode, semanticModel));
+        }
+
+        private void AddRootSymbol(
+            IMethodSymbol method,
+            Project project,
+            RootSymbolKind kind,
+            string? metadataJson)
+        {
+            var normalizedMethod = method.OriginalDefinition;
+            if (!sourceStableIdsBySymbol.TryGetValue(normalizedMethod, out var sourceStableId))
+            {
+                diagnostics.Add($"Skipped {FormatRootKind(kind)} root '{SymbolFormatting.FormatMethod(normalizedMethod)}' because no captured source symbol matched it.");
+                return;
+            }
+
+            if (!symbolsByStableId.TryGetValue(sourceStableId, out var symbol) || symbol.ProjectStableId is null)
+            {
+                diagnostics.Add($"Skipped {FormatRootKind(kind)} root '{SymbolFormatting.FormatMethod(normalizedMethod)}' because it did not resolve to a source project.");
+                return;
+            }
+
+            var projectStableId = CreateProjectStableId(project);
+            if (!string.Equals(symbol.ProjectStableId, projectStableId, StringComparison.Ordinal))
+            {
+                diagnostics.Add($"Skipped {FormatRootKind(kind)} root '{SymbolFormatting.FormatMethod(normalizedMethod)}' because it resolved to a different source project.");
+                return;
+            }
+
+            var key = $"{projectStableId}\n{sourceStableId}\n{kind}";
+            if (!rootSymbolKeys.Add(key))
+            {
+                return;
+            }
+
+            rootSymbols.Add(new CallGraphRootSymbol(projectStableId, sourceStableId, kind, metadataJson));
         }
 
         private IReadOnlyList<CallGraphCall> CollectCalls(SourceMethodBody body, CancellationToken cancellationToken)
@@ -307,6 +408,89 @@ public sealed class CallGraphBuilder
                 span.Path,
                 span.StartLinePosition.Line + 1,
                 span.StartLinePosition.Character + 1);
+        }
+
+        private static bool IsAspNetControllerAction(IMethodSymbol method)
+        {
+            if (method.MethodKind != MethodKind.Ordinary ||
+                method.DeclaredAccessibility != Accessibility.Public ||
+                method.IsStatic ||
+                method.ContainingType is null ||
+                HasAttribute(method, "Microsoft.AspNetCore.Mvc.NonActionAttribute"))
+            {
+                return false;
+            }
+
+            var containingType = method.ContainingType;
+            if (IsAspNetControllerType(containingType))
+            {
+                return true;
+            }
+
+            return containingType.Name.EndsWith("Controller", StringComparison.Ordinal) &&
+                HasHttpMethodAttribute(method);
+        }
+
+        private static bool IsAspNetControllerType(INamedTypeSymbol type)
+        {
+            return InheritsFrom(type, "Microsoft.AspNetCore.Mvc.ControllerBase") ||
+                InheritsFrom(type, "Microsoft.AspNetCore.Mvc.Controller") ||
+                HasAttribute(type, "Microsoft.AspNetCore.Mvc.ApiControllerAttribute") ||
+                HasAttribute(type, "Microsoft.AspNetCore.Mvc.ControllerAttribute");
+        }
+
+        private static bool HasHttpMethodAttribute(IMethodSymbol method)
+        {
+            return method.GetAttributes().Any(attribute =>
+                InheritsFrom(attribute.AttributeClass, "Microsoft.AspNetCore.Mvc.Routing.HttpMethodAttribute"));
+        }
+
+        private static bool HasAttribute(ISymbol symbol, string fullMetadataName)
+        {
+            return symbol.GetAttributes().Any(attribute =>
+                HasFullMetadataName(attribute.AttributeClass, fullMetadataName));
+        }
+
+        private static bool InheritsFrom(INamedTypeSymbol? type, string fullMetadataName)
+        {
+            for (var current = type; current is not null; current = current.BaseType)
+            {
+                if (HasFullMetadataName(current, fullMetadataName))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasFullMetadataName(INamedTypeSymbol? type, string fullMetadataName)
+        {
+            return type is not null &&
+                string.Equals(GetFullMetadataName(type), fullMetadataName, StringComparison.Ordinal);
+        }
+
+        private static string GetFullMetadataName(INamedTypeSymbol type)
+        {
+            var prefix = type.ContainingType is not null
+                ? GetFullMetadataName(type.ContainingType)
+                : type.ContainingNamespace is { IsGlobalNamespace: false }
+                    ? type.ContainingNamespace.ToDisplayString()
+                    : string.Empty;
+
+            return string.IsNullOrEmpty(prefix)
+                ? type.MetadataName
+                : $"{prefix}.{type.MetadataName}";
+        }
+
+        private static string FormatRootKind(RootSymbolKind kind)
+        {
+            return kind switch
+            {
+                RootSymbolKind.CompilerEntryPoint => "compiler entry point",
+                RootSymbolKind.AspNetControllerAction => "ASP.NET controller action",
+                _ => kind.ToString()
+            };
         }
 
         private static string CreateProjectStableId(Project project)

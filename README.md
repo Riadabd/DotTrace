@@ -35,6 +35,7 @@ dotnet run --project src/DotTrace.Cli -- serve --db trace.db
 dotnet run --project src/DotTrace.Cli -- tree --db trace.db \
   --symbol 'Your.Namespace.EntryPoint.Run(System.String[])' \
   --format text
+dotnet run --project src/DotTrace.Cli -- map --db trace.db --project Your.App
 ```
 
 Write HTML output to a file:
@@ -77,6 +78,14 @@ dottrace tree --db <path-to-cache.db> --symbol <fully-qualified-method-signature
   [--format text|html]
   [--out <path>]
   [--no-color]
+
+dottrace map --db <path-to-cache.db>
+  [--project <id|name|assembly|path>]
+  [--snapshot <id>]
+  [--max-depth <n>]
+  [--format text|html]
+  [--out <path>]
+  [--no-color]
 ```
 
 Example root symbols:
@@ -92,7 +101,7 @@ Example root symbols:
 dottrace serve --db trace.db
 ```
 
-The command binds to `127.0.0.1`, chooses an available port unless `--port` is supplied, and prints the URL. The UI lets you select a snapshot, search source methods, inspect the selected method metadata, and render callers, callees, or both from the cache.
+The command binds to `127.0.0.1`, chooses an available port unless `--port` is supplied, and prints the URL. The UI lets you select a snapshot and project, search source methods, inspect the selected method metadata, render callers/callees/both, and render a project-scoped map from the cache.
 
 Quote `--symbol` values in zsh, bash, and similar shells because method signatures contain parentheses:
 
@@ -113,8 +122,9 @@ dottrace tree --db trace.db --symbol 'MyCompany.App.Program.Main(System.String[]
 ## Cache Behavior
 
 - Every successful `cache build` creates a new complete snapshot in the SQLite DB
-- `tree` reads the active snapshot by default
+- `tree` and `map` read the active snapshot by default
 - `tree --snapshot <id>` renders an older snapshot
+- `map --snapshot <id>` renders an older snapshot
 - Historical snapshots are retained until a future pruning command exists
 
 `cache list` prints tab-separated snapshot metadata:
@@ -143,9 +153,10 @@ The current cache schema is intended to be inspectable. Prefer DotTrace commands
 | `projects` | Projects loaded for a snapshot. | `snapshot_id`, `stable_id`, `name`, `assembly_name`, `file_path` |
 | `symbols` | Source and external methods. | `snapshot_id`, `project_id`, `stable_id`, `qualified_name`, `signature_text`, `origin_kind`, `file_path`, `line`, `column` |
 | `calls` | Direct call edges from one source symbol to another symbol or unresolved call text. | `snapshot_id`, `caller_symbol_id`, `callee_symbol_id`, `call_text`, `file_path`, `line`, `column`, `ordinal` |
+| `root_symbols` | Discovered source symbols used as project map roots. | `snapshot_id`, `project_id`, `symbol_id`, `kind`, `metadata_json` |
 | `diagnostics` | MSBuildWorkspace diagnostics captured during cache build. | `snapshot_id`, `message` |
 
-All graph tables are scoped by `snapshot_id`. When joining `calls` to `symbols`, join on both `snapshot_id` and symbol id. `calls.callee_symbol_id` is nullable; `NULL` means DotTrace recorded the call syntax but Roslyn did not resolve a callee method symbol.
+All graph tables are scoped by `snapshot_id`. When joining `calls` or `root_symbols` to `symbols`, join on both `snapshot_id` and symbol id. `calls.callee_symbol_id` is nullable; `NULL` means DotTrace recorded the call syntax but Roslyn did not resolve a callee method symbol.
 
 Find symbols to use with `--symbol`:
 
@@ -212,10 +223,14 @@ ORDER BY caller.signature_text, c.ordinal;
 - `--view callees` is the default downstream call tree
 - `--view callers` renders recursive callers for the selected method
 - `--view both` renders caller paths with a duplicated highlighted target tree row and callees nested under each target; HTML includes that full view as an extra tab alongside the separate callers and callees tabs
+- `map` renders a selected project's discovered roots first, then source methods with no in-project callers, then remaining source islands/cycles
+- `map` stays inside the selected project; calls into another checked-out source project render as `[boundary]` leaves
 
 ## Call Model
 
 DotTrace builds a static call graph from Roslyn symbols. It records direct calls from executable source declarations, then projects a tree from the cached graph.
+
+Project maps use persisted `root_symbols` when available. Current discovered root kinds are compiler entry points from Roslyn and conservative ASP.NET MVC/Web API controller actions. Minimal APIs, hosted services, dependency injection wiring, reflection, and event effects are not inferred.
 
 Captured source declarations include methods, constructors, destructors, operators, conversion operators, property/indexer accessors, and local functions with bodies.
 
@@ -237,8 +252,10 @@ HTML output uses the same node labels as text output:
 
 | Label | Meaning |
 | --- | --- |
+| `group` | A synthetic grouping node such as a project map or root section. |
 | `source` | A method resolved to source code in the analyzed solution or project. Source nodes expand recursively. |
 | `external` | Roslyn resolved the call, but the callee is outside the analyzed source, such as framework or package code. External nodes render as leaves. |
+| `boundary` | A source method in another loaded project. Project maps render it as a leaf to keep the selected project scoped. |
 | `cycle` | The callee is already in the current recursion path, such as `A -> B -> A`. Cycle nodes render as leaves to avoid infinite expansion. |
 | `seen` | The source method was already expanded elsewhere in the rendered tree, but is not in the current recursion path. This marks shared or repeated calls without expanding the same method again. |
 | `max-depth` | Expansion stopped because `--max-depth` was reached. The method may still have calls below it, but they were intentionally omitted from this render. |

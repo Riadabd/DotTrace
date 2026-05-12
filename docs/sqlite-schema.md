@@ -1,15 +1,15 @@
 # SQLite Cache Schema
 
-This documents SQLite cache schema version `1`, created by `src/DotTrace.Core/Persistence/SqliteSchema.cs`.
+This documents SQLite cache schema version `2`, created by `src/DotTrace.Core/Persistence/SqliteSchema.cs`.
 
 Treat `SqliteSchema` as the source of truth. When changing the DDL, `PRAGMA user_version`, or cache persistence behavior, update this file in the same change.
 
 ## Lifecycle
 
 - `SqliteGraphCache` opens SQLite connections with foreign keys enabled.
-- `SqliteSchema.EnsureCreatedAsync` creates all tables and indexes, sets `PRAGMA user_version = 1`, and inserts the singleton `cache_state` row if it is missing.
+- `SqliteSchema.EnsureCreatedAsync` creates all tables and indexes, sets `PRAGMA user_version = 2`, and inserts the singleton `cache_state` row if it is missing.
 - `cache build` writes one complete snapshot inside a transaction, then points `cache_state.active_snapshot_id` at the new snapshot.
-- `tree --db <path>` reads `cache_state.active_snapshot_id` by default. `tree --snapshot <id>` reads a specific historical snapshot.
+- `tree --db <path>` and `map --db <path>` read `cache_state.active_snapshot_id` by default. `--snapshot <id>` reads a specific historical snapshot.
 
 ## Tables
 
@@ -98,6 +98,25 @@ Constraints:
 - `FOREIGN KEY (snapshot_id, caller_symbol_id) REFERENCES symbols(snapshot_id, id)` keeps caller references inside the same snapshot.
 - `FOREIGN KEY (snapshot_id, callee_symbol_id) REFERENCES symbols(snapshot_id, id)` keeps resolved callee references inside the same snapshot.
 
+### `root_symbols`
+
+Discovered source symbols that are useful map roots for a project. These rows annotate existing `symbols`; they do not define separate graph nodes.
+
+| Column | Type | Nullable | Meaning |
+| --- | --- | --- | --- |
+| `id` | `INTEGER PRIMARY KEY` | No | Database-local root row id. |
+| `snapshot_id` | `INTEGER REFERENCES snapshots(id) ON DELETE CASCADE` | No | Snapshot that owns this root row. |
+| `project_id` | `INTEGER` | No | Project whose project map should use the root. |
+| `symbol_id` | `INTEGER` | No | Existing source `symbols.id` to use as a map root. |
+| `kind` | `TEXT` | No | Root kind. Current values are `compiler-entry-point` and `aspnet-controller-action`. |
+| `metadata_json` | `TEXT` | Yes | Reserved metadata payload for future root-specific details. |
+
+Constraints:
+
+- `FOREIGN KEY (snapshot_id, project_id) REFERENCES projects(snapshot_id, id)` keeps project references inside the same snapshot.
+- `FOREIGN KEY (snapshot_id, symbol_id) REFERENCES symbols(snapshot_id, id)` keeps root symbols inside the same snapshot.
+- `UNIQUE (snapshot_id, project_id, symbol_id, kind)` prevents duplicate root annotations.
+
 ### `diagnostics`
 
 MSBuildWorkspace diagnostics captured while building a snapshot.
@@ -118,11 +137,13 @@ MSBuildWorkspace diagnostics captured while building a snapshot.
 | `ix_symbols_snapshot_normalized_signature` | `symbols` | `snapshot_id`, `normalized_signature_text` | Resolve `--symbol` selectors by normalized signature. |
 | `ix_calls_snapshot_caller_ordinal` | `calls` | `snapshot_id`, `caller_symbol_id`, `ordinal` | Load outgoing calls in caller render order. |
 | `ix_calls_snapshot_callee` | `calls` | `snapshot_id`, `callee_symbol_id` | Load incoming calls for callers/callees views. |
+| `ix_root_symbols_snapshot_project_kind` | `root_symbols` | `snapshot_id`, `project_id`, `kind`, `symbol_id` | Load discovered roots for project map rendering. |
 
 ## Join Rules
 
-- All graph tables are scoped by `snapshot_id`. Do not join `projects`, `symbols`, or `calls` by row id alone.
+- All graph tables are scoped by `snapshot_id`. Do not join `projects`, `symbols`, `calls`, or `root_symbols` by row id alone.
 - Join `calls.caller_symbol_id` to `symbols.id` with both `snapshot_id` and `id`.
 - Join `calls.callee_symbol_id` to `symbols.id` with both `snapshot_id` and `id`, using a left join because unresolved calls store `NULL`.
+- Join `root_symbols.symbol_id` to `symbols.id` with both `snapshot_id` and `id`.
 - Join `symbols.project_id` to `projects.id` with both `snapshot_id` and `id`, using a left join because external symbols may not have a project.
-- Deleting a `snapshots` row cascades to `projects`, `symbols`, `calls`, and `diagnostics`. The current CLI keeps historical snapshots; pruning is future work.
+- Deleting a `snapshots` row cascades to `projects`, `symbols`, `calls`, `root_symbols`, and `diagnostics`. The current CLI keeps historical snapshots; pruning is future work.

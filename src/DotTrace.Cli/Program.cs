@@ -23,6 +23,7 @@ internal static partial class ProgramEntry
         var rootCommand = new RootCommand("Roslyn-powered static call-tree explorer for C# solutions and projects.");
         rootCommand.Subcommands.Add(CreateCacheCommand());
         rootCommand.Subcommands.Add(CreateTreeCommand());
+        rootCommand.Subcommands.Add(CreateMapCommand());
         rootCommand.Subcommands.Add(CreateServeCommand());
         rootCommand.SetAction(parseResult => new HelpAction().Invoke(parseResult));
         return rootCommand;
@@ -186,6 +187,92 @@ internal static partial class ProgramEntry
         return treeCommand;
     }
 
+    private static Command CreateMapCommand()
+    {
+        var dbOption = CreateDbOption();
+        var projectOption = new Option<string?>("--project")
+        {
+            Description = "Project id, name, assembly name, or project file path to map."
+        };
+        var snapshotOption = new Option<long?>("--snapshot")
+        {
+            Description = "Read a specific snapshot id instead of the active snapshot."
+        };
+        snapshotOption.Validators.Add(result =>
+        {
+            var value = result.GetValueOrDefault<long?>();
+            if (value is <= 0)
+            {
+                result.AddError("--snapshot must be a positive integer.");
+            }
+        });
+
+        var maxDepthOption = new Option<int?>("--max-depth")
+        {
+            Description = "Limit recursive expansion depth."
+        };
+        maxDepthOption.Validators.Add(result =>
+        {
+            var value = result.GetValueOrDefault<int?>();
+            if (value is <= 0)
+            {
+                result.AddError("--max-depth must be a positive integer.");
+            }
+        });
+
+        var formatOption = new Option<string>("--format")
+        {
+            Description = "Output format: text or html.",
+            DefaultValueFactory = _ => "text"
+        };
+        formatOption.Validators.Add(result =>
+        {
+            var value = result.GetValueOrDefault<string>();
+            if (!string.IsNullOrWhiteSpace(value) && !TryParseFormat(value, out _))
+            {
+                result.AddError($"Unknown format '{value}'. Supported values: text, html.");
+            }
+        });
+
+        var outputPathOption = new Option<string?>("--out")
+        {
+            Description = "Write output to a file instead of stdout."
+        };
+        var noColorOption = new Option<bool>("--no-color")
+        {
+            Description = "Disable ANSI color output for text rendering."
+        };
+
+        var mapCommand = new Command("map", "Render a project-scoped codebase map from a SQLite call-graph snapshot.");
+        mapCommand.Options.Add(dbOption);
+        mapCommand.Options.Add(projectOption);
+        mapCommand.Options.Add(snapshotOption);
+        mapCommand.Options.Add(maxDepthOption);
+        mapCommand.Options.Add(formatOption);
+        mapCommand.Options.Add(outputPathOption);
+        mapCommand.Options.Add(noColorOption);
+        mapCommand.SetAction(async (parseResult, cancellationToken) =>
+        {
+            var formatValue = parseResult.GetValue(formatOption) ?? "text";
+            TryParseFormat(formatValue, out var format);
+
+            var options = new MapOptions
+            {
+                DbPath = parseResult.GetValue(dbOption)!,
+                Project = parseResult.GetValue(projectOption),
+                SnapshotId = parseResult.GetValue(snapshotOption),
+                MaxDepth = parseResult.GetValue(maxDepthOption),
+                Format = format,
+                OutputPath = parseResult.GetValue(outputPathOption),
+                NoColor = parseResult.GetValue(noColorOption)
+            };
+
+            return await RunMapAsync(options, cancellationToken);
+        });
+
+        return mapCommand;
+    }
+
     private static Option<string> CreateDbOption()
     {
         return new Option<string>("--db")
@@ -283,6 +370,47 @@ internal static partial class ProgramEntry
         }
     }
 
+    private static async Task<int> RunMapAsync(MapOptions options, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var cache = new SqliteGraphCache();
+            var projects = await cache.ListProjectsAsync(options.DbPath, options.SnapshotId, cancellationToken);
+            var project = ResolveProject(projects, options.Project);
+            var map = await cache.ProjectMapAsync(
+                options.DbPath,
+                project.Id,
+                new AnalysisOptions(options.MaxDepth),
+                options.SnapshotId,
+                cancellationToken);
+            var output = RenderMap(map, options);
+
+            if (options.OutputPath is null)
+            {
+                Console.Write(output);
+            }
+            else
+            {
+                var fullOutputPath = Path.GetFullPath(options.OutputPath);
+                var directory = Path.GetDirectoryName(fullOutputPath);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                await File.WriteAllTextAsync(fullOutputPath, output, Encoding.UTF8, cancellationToken);
+                Console.Error.WriteLine($"Wrote {options.Format} output to {fullOutputPath}");
+            }
+
+            return 0;
+        }
+        catch (DotTraceException exception)
+        {
+            Console.Error.WriteLine(exception.Message);
+            return 1;
+        }
+    }
+
     private static string Render(CallTreeDocument document, TreeOptions options)
     {
         return options.Format switch
@@ -293,6 +421,80 @@ internal static partial class ProgramEntry
                 options.View,
                 new RenderOptions(UseColor: !options.NoColor && options.OutputPath is null && !Console.IsOutputRedirected))
         };
+    }
+
+    private static string RenderMap(CallTreeNode map, MapOptions options)
+    {
+        return options.Format switch
+        {
+            OutputFormat.Html => new HtmlTreeRenderer().RenderMap(map),
+            _ => new TextTreeRenderer().Render(
+                map,
+                new RenderOptions(UseColor: !options.NoColor && options.OutputPath is null && !Console.IsOutputRedirected))
+        };
+    }
+
+    private static CallGraphProjectInfo ResolveProject(
+        IReadOnlyList<CallGraphProjectInfo> projects,
+        string? selector)
+    {
+        if (projects.Count == 0)
+        {
+            throw new DotTraceException("SQLite cache snapshot does not contain any projects.");
+        }
+
+        if (string.IsNullOrWhiteSpace(selector))
+        {
+            if (projects.Count == 1)
+            {
+                return projects[0];
+            }
+
+            throw new DotTraceException(
+                $"--project is required because the selected snapshot contains multiple projects:{Environment.NewLine}{FormatProjectList(projects)}");
+        }
+
+        var normalizedSelector = selector.Trim();
+        var matches = projects.Where(project => ProjectMatches(project, normalizedSelector)).ToArray();
+        if (matches.Length == 0)
+        {
+            throw new DotTraceException(
+                $"No project matched '{selector}'. Available projects:{Environment.NewLine}{FormatProjectList(projects)}");
+        }
+
+        if (matches.Length > 1)
+        {
+            throw new DotTraceException(
+                $"Project selector '{selector}' is ambiguous. Matches:{Environment.NewLine}{FormatProjectList(matches)}");
+        }
+
+        return matches[0];
+    }
+
+    private static bool ProjectMatches(CallGraphProjectInfo project, string selector)
+    {
+        if (long.TryParse(selector, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) && project.Id == id)
+        {
+            return true;
+        }
+
+        if (string.Equals(project.Name, selector, StringComparison.Ordinal) ||
+            string.Equals(project.AssemblyName, selector, StringComparison.Ordinal) ||
+            string.Equals(project.FilePath, selector, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var fullPath = Path.GetFullPath(selector);
+        return string.Equals(project.FilePath, fullPath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FormatProjectList(IEnumerable<CallGraphProjectInfo> projects)
+    {
+        return string.Join(
+            Environment.NewLine,
+            projects.Select(project =>
+                $" - {project.Id.ToString(CultureInfo.InvariantCulture)}\t{project.Name}\t{project.AssemblyName}\t{project.FilePath}"));
     }
 
     private static bool TryParseFormat(string value, out OutputFormat format)
@@ -367,6 +569,23 @@ internal static partial class ProgramEntry
         public OutputFormat Format { get; set; } = OutputFormat.Text;
 
         public CallTreeView View { get; set; } = CallTreeView.Callees;
+
+        public string? OutputPath { get; set; }
+
+        public bool NoColor { get; set; }
+    }
+
+    private sealed class MapOptions
+    {
+        public string DbPath { get; set; } = string.Empty;
+
+        public string? Project { get; set; }
+
+        public long? SnapshotId { get; set; }
+
+        public int? MaxDepth { get; set; }
+
+        public OutputFormat Format { get; set; } = OutputFormat.Text;
 
         public string? OutputPath { get; set; }
 

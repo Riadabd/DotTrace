@@ -17,8 +17,10 @@ internal static class BrowserUi
               --border: #d4dbe6;
               --accent: #0b5cad;
               --accent-ink: #ffffff;
+              --group: #253244;
               --source: #0b5cad;
               --external: #946200;
+              --boundary: #c05621;
               --cycle: #b4235a;
               --repeated: #6d4bc2;
               --truncated: #8a6400;
@@ -261,6 +263,8 @@ internal static class BrowserUi
 
             .kind-source { color: var(--source); }
             .kind-external { color: var(--external); }
+            .kind-group { color: var(--group); font-weight: 700; }
+            .kind-boundary { color: var(--boundary); }
             .kind-cycle { color: var(--cycle); }
             .kind-repeated { color: var(--repeated); }
             .kind-truncated { color: var(--truncated); }
@@ -301,6 +305,9 @@ internal static class BrowserUi
               <label for="snapshotSelect">Snapshot</label>
               <select id="snapshotSelect"></select>
 
+              <label for="projectSelect">Project</label>
+              <select id="projectSelect"></select>
+
               <label for="symbolSearch">Method search</label>
               <input id="symbolSearch" type="search" autocomplete="off" placeholder="Type namespace, class, or method" />
 
@@ -327,6 +334,7 @@ internal static class BrowserUi
                       <button type="button" data-view="both">Both</button>
                     </div>
                   </div>
+                  <button id="renderMap" type="button">Map</button>
                   <button id="refreshTree" type="button" disabled>Refresh</button>
                 </div>
               </section>
@@ -341,19 +349,23 @@ internal static class BrowserUi
             const state = {
               config: null,
               snapshots: [],
+              projects: [],
               selectedSymbol: null,
               selectedView: 'callees',
+              activeContent: 'tree',
               searchTimer: 0
             };
 
             const elements = {
               dbPath: document.getElementById('dbPath'),
               snapshotSelect: document.getElementById('snapshotSelect'),
+              projectSelect: document.getElementById('projectSelect'),
               symbolSearch: document.getElementById('symbolSearch'),
               symbolResults: document.getElementById('symbolResults'),
               selectedSignature: document.getElementById('selectedSignature'),
               selectedMeta: document.getElementById('selectedMeta'),
               maxDepth: document.getElementById('maxDepth'),
+              renderMap: document.getElementById('renderMap'),
               refreshTree: document.getElementById('refreshTree'),
               treeShell: document.getElementById('treeShell')
             };
@@ -376,6 +388,11 @@ internal static class BrowserUi
 
             function selectedSnapshot() {
               const value = elements.snapshotSelect.value;
+              return value ? Number(value) : null;
+            }
+
+            function selectedProject() {
+              const value = elements.projectSelect.value;
               return value ? Number(value) : null;
             }
 
@@ -438,6 +455,22 @@ internal static class BrowserUi
               }
             }
 
+            async function loadProjects() {
+              const params = new URLSearchParams();
+              const snapshot = selectedSnapshot();
+              if (snapshot) params.set('snapshot', snapshot);
+
+              state.projects = await api(`/api/projects?${params}`);
+              elements.projectSelect.replaceChildren();
+
+              for (const project of state.projects) {
+                const option = document.createElement('option');
+                option.value = project.id;
+                option.textContent = `${project.name} (${project.sourceSymbolCount} methods, ${project.rootSymbolCount} roots)`;
+                elements.projectSelect.appendChild(option);
+              }
+            }
+
             async function searchSymbols() {
               const params = new URLSearchParams();
               const snapshot = selectedSnapshot();
@@ -489,6 +522,7 @@ internal static class BrowserUi
             }
 
             async function selectSymbol(symbol) {
+              state.activeContent = 'tree';
               state.selectedSymbol = symbol;
               renderSelected(symbol);
               elements.refreshTree.disabled = false;
@@ -506,8 +540,25 @@ internal static class BrowserUi
               }
             }
 
+            function renderSelectedProject(project) {
+              elements.selectedSignature.textContent = `Map: ${project.name}`;
+              elements.selectedMeta.replaceChildren();
+              const values = [
+                `${project.sourceSymbolCount} source methods`,
+                `${project.rootSymbolCount} discovered roots`,
+                `${project.directCallCount} direct calls`
+              ];
+              if (project.filePath) values.push(project.filePath);
+              for (const value of values) {
+                const item = document.createElement('span');
+                item.textContent = value;
+                elements.selectedMeta.appendChild(item);
+              }
+            }
+
             async function loadTree() {
               if (!state.selectedSymbol) return;
+              state.activeContent = 'tree';
 
               const params = new URLSearchParams();
               params.set('symbolId', state.selectedSymbol.id);
@@ -520,6 +571,32 @@ internal static class BrowserUi
               try {
                 const response = await api(`/api/tree?${params}`);
                 renderTree(response.document, response.view);
+              } catch (error) {
+                setError(elements.treeShell, error);
+              }
+            }
+
+            async function loadMap() {
+              state.activeContent = 'map';
+              const projectId = selectedProject();
+              if (!projectId) {
+                setBusy(elements.treeShell, 'No project available in this snapshot.');
+                return;
+              }
+
+              const project = state.projects.find(candidate => candidate.id === projectId);
+              if (project) renderSelectedProject(project);
+
+              const params = new URLSearchParams();
+              params.set('projectId', projectId);
+              const snapshot = selectedSnapshot();
+              if (snapshot) params.set('snapshot', snapshot);
+              if (elements.maxDepth.value) params.set('maxDepth', elements.maxDepth.value);
+
+              setBusy(elements.treeShell, 'Rendering map...');
+              try {
+                const response = await api(`/api/map?${params}`);
+                renderMap(response.map);
               } catch (error) {
                 setError(elements.treeShell, error);
               }
@@ -539,6 +616,11 @@ internal static class BrowserUi
 
               const root = view === 'callers' ? document.callersTree : document.calleesTree;
               appendTree(root.children);
+            }
+
+            function renderMap(map) {
+              elements.treeShell.replaceChildren();
+              appendTree([map]);
             }
 
             function appendTreeSection(label) {
@@ -610,16 +692,26 @@ internal static class BrowserUi
               });
 
               elements.snapshotSelect.addEventListener('change', async () => {
+                state.activeContent = 'tree';
                 state.selectedSymbol = null;
                 elements.refreshTree.disabled = true;
                 elements.selectedSignature.textContent = 'No method selected';
                 elements.selectedMeta.replaceChildren();
                 setBusy(elements.treeShell, 'Select a source method to render its call tree.');
+                await loadProjects();
                 await searchSymbols();
               });
 
+              elements.projectSelect.addEventListener('change', loadMap);
+              elements.renderMap.addEventListener('click', loadMap);
               elements.refreshTree.addEventListener('click', loadTree);
-              elements.maxDepth.addEventListener('change', loadTree);
+              elements.maxDepth.addEventListener('change', () => {
+                if (state.activeContent === 'map') {
+                  loadMap();
+                } else {
+                  loadTree();
+                }
+              });
 
               for (const button of document.querySelectorAll('[data-view]')) {
                 button.addEventListener('click', () => {
@@ -637,6 +729,7 @@ internal static class BrowserUi
               try {
                 await loadConfig();
                 await loadSnapshots();
+                await loadProjects();
                 await searchSymbols();
               } catch (error) {
                 setError(elements.symbolResults, error);
