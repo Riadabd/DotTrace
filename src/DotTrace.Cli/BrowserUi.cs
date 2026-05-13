@@ -413,8 +413,10 @@ internal static class BrowserUi
             }
 
             function formatLocation(location) {
-              if (!location || !location.filePath) return '';
-              return `${location.filePath}:${location.line}:${location.column}`;
+              if (!location) return '';
+              const path = location.displayPath || location.filePath;
+              if (!path) return '';
+              return `${path}:${location.line}:${location.column}`;
             }
 
             function renderMeta(symbol) {
@@ -548,7 +550,7 @@ internal static class BrowserUi
                 `${project.rootSymbolCount} discovered roots`,
                 `${project.directCallCount} direct calls`
               ];
-              if (project.filePath) values.push(project.filePath);
+              if (project.displayPath || project.filePath) values.push(project.displayPath || project.filePath);
               for (const value of values) {
                 const item = document.createElement('span');
                 item.textContent = value;

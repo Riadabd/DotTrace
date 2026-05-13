@@ -136,7 +136,13 @@ internal static class BrowserServer
                     pageSize ?? 50,
                     cancellationToken);
 
-                return Results.Ok(symbols);
+                var formatter = await CreatePathFormatterAsync(
+                    cache,
+                    dbPath,
+                    snapshot ?? options.InitialSnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(symbols.Select(symbol => BrowserSymbolInfo.From(symbol, formatter)).ToArray());
             });
         });
 
@@ -153,7 +159,13 @@ internal static class BrowserServer
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
-                return Results.Ok(symbol);
+                var formatter = await CreatePathFormatterAsync(
+                    cache,
+                    dbPath,
+                    snapshot ?? options.InitialSnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(BrowserSymbolInfo.From(symbol, formatter));
             });
         });
 
@@ -168,7 +180,13 @@ internal static class BrowserServer
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
-                return Results.Ok(projects);
+                var formatter = await CreatePathFormatterAsync(
+                    cache,
+                    dbPath,
+                    snapshot ?? options.InitialSnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(projects.Select(project => BrowserProjectInfo.From(project, formatter)).ToArray());
             });
         });
 
@@ -194,7 +212,15 @@ internal static class BrowserServer
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
-                return Results.Ok(new BrowserTreeResponse(selectedView, document));
+                var formatter = await CreatePathFormatterAsync(
+                    cache,
+                    dbPath,
+                    snapshot ?? options.InitialSnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(new BrowserTreeResponse(
+                    selectedView,
+                    BrowserCallTreeDocument.From(document, formatter)));
             });
         });
 
@@ -223,9 +249,36 @@ internal static class BrowserServer
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
-                return Results.Ok(new BrowserMapResponse(map));
+                var formatter = await CreatePathFormatterAsync(
+                    cache,
+                    dbPath,
+                    snapshot ?? options.InitialSnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(new BrowserMapResponse(BrowserCallTreeNode.From(map, formatter)));
             });
         });
+    }
+
+    private static async Task<BrowserPathFormatter> CreatePathFormatterAsync(
+        SqliteGraphCache cache,
+        string dbPath,
+        long? snapshotId,
+        CancellationToken cancellationToken)
+    {
+        var snapshots = await cache.ListSnapshotsAsync(dbPath, cancellationToken);
+        var snapshot = snapshotId is null
+            ? snapshots.FirstOrDefault(candidate => candidate.IsActive)
+            : snapshots.FirstOrDefault(candidate => candidate.Id == snapshotId.Value);
+
+        if (snapshot is null)
+        {
+            throw snapshotId is null
+                ? new DotTraceException("SQLite cache does not have an active snapshot. Run 'cache build' first.")
+                : new DotTraceException($"SQLite cache snapshot {snapshotId.Value} does not exist.");
+        }
+
+        return BrowserPathFormatter.FromInputPath(snapshot.InputPath);
     }
 
     private static async Task ValidateCacheAsync(
@@ -278,7 +331,162 @@ internal static class BrowserServer
         return addresses?.FirstOrDefault() ?? app.Urls.First();
     }
 
-    private sealed record BrowserTreeResponse(CallTreeView View, CallTreeDocument Document);
+    private sealed record BrowserTreeResponse(CallTreeView View, BrowserCallTreeDocument Document);
 
-    private sealed record BrowserMapResponse(CallTreeNode Map);
+    private sealed record BrowserMapResponse(BrowserCallTreeNode Map);
+
+    private sealed record BrowserSymbolInfo(
+        long Id,
+        long SnapshotId,
+        string QualifiedName,
+        string SignatureText,
+        SymbolOriginKind OriginKind,
+        string? ProjectName,
+        string? ProjectAssemblyName,
+        string? ProjectFilePath,
+        string? ProjectDisplayPath,
+        BrowserLocation? Location,
+        long DirectCallerCount,
+        long DirectCalleeCount)
+    {
+        public static BrowserSymbolInfo From(CallGraphSymbolInfo symbol, BrowserPathFormatter formatter)
+        {
+            return new BrowserSymbolInfo(
+                symbol.Id,
+                symbol.SnapshotId,
+                symbol.QualifiedName,
+                symbol.SignatureText,
+                symbol.OriginKind,
+                symbol.ProjectName,
+                symbol.ProjectAssemblyName,
+                symbol.ProjectFilePath,
+                symbol.ProjectFilePath is null ? null : formatter.FormatPath(symbol.ProjectFilePath),
+                BrowserLocation.From(symbol.Location, formatter),
+                symbol.DirectCallerCount,
+                symbol.DirectCalleeCount);
+        }
+    }
+
+    private sealed record BrowserProjectInfo(
+        long Id,
+        long SnapshotId,
+        string Name,
+        string AssemblyName,
+        string FilePath,
+        string DisplayPath,
+        long SourceSymbolCount,
+        long RootSymbolCount,
+        long DirectCallCount)
+    {
+        public static BrowserProjectInfo From(CallGraphProjectInfo project, BrowserPathFormatter formatter)
+        {
+            return new BrowserProjectInfo(
+                project.Id,
+                project.SnapshotId,
+                project.Name,
+                project.AssemblyName,
+                project.FilePath,
+                formatter.FormatPath(project.FilePath),
+                project.SourceSymbolCount,
+                project.RootSymbolCount,
+                project.DirectCallCount);
+        }
+    }
+
+    private sealed record BrowserCallTreeDocument(
+        BrowserCallTreeNode SelectedRoot,
+        BrowserCallTreeNode CallersTree,
+        BrowserCallTreeNode CalleesTree)
+    {
+        public static BrowserCallTreeDocument From(CallTreeDocument document, BrowserPathFormatter formatter)
+        {
+            return new BrowserCallTreeDocument(
+                BrowserCallTreeNode.From(document.SelectedRoot, formatter),
+                BrowserCallTreeNode.From(document.CallersTree, formatter),
+                BrowserCallTreeNode.From(document.CalleesTree, formatter));
+        }
+    }
+
+    private sealed record BrowserCallTreeNode(
+        string Id,
+        string DisplayText,
+        CallTreeNodeKind Kind,
+        BrowserLocation? Location,
+        IReadOnlyList<BrowserCallTreeNode> Children)
+    {
+        public static BrowserCallTreeNode From(CallTreeNode node, BrowserPathFormatter formatter)
+        {
+            return new BrowserCallTreeNode(
+                node.Id,
+                node.DisplayText,
+                node.Kind,
+                BrowserLocation.From(node.Location, formatter),
+                node.Children.Select(child => From(child, formatter)).ToArray());
+        }
+    }
+
+    private sealed record BrowserLocation(string FilePath, string DisplayPath, int Line, int Column)
+    {
+        public static BrowserLocation? From(SourceLocationInfo? location, BrowserPathFormatter formatter)
+        {
+            return location is null
+                ? null
+                : new BrowserLocation(
+                    location.FilePath,
+                    formatter.FormatPath(location.FilePath),
+                    location.Line,
+                    location.Column);
+        }
+    }
+
+    private sealed class BrowserPathFormatter
+    {
+        private readonly string sourceRootPath;
+
+        private BrowserPathFormatter(string sourceRootPath)
+        {
+            this.sourceRootPath = sourceRootPath;
+        }
+
+        public static BrowserPathFormatter FromInputPath(string inputPath)
+        {
+            var fullInputPath = Path.GetFullPath(inputPath);
+            var sourceRootPath = Path.GetDirectoryName(fullInputPath);
+            if (string.IsNullOrEmpty(sourceRootPath))
+            {
+                sourceRootPath = Path.GetPathRoot(fullInputPath) ?? fullInputPath;
+            }
+
+            return new BrowserPathFormatter(sourceRootPath);
+        }
+
+        public string FormatPath(string filePath)
+        {
+            try
+            {
+                var fullPath = Path.GetFullPath(filePath);
+                var relativePath = Path.GetRelativePath(sourceRootPath, fullPath);
+                if (Path.IsPathFullyQualified(relativePath))
+                {
+                    return filePath;
+                }
+
+                return NormalizePath(relativePath);
+            }
+            catch (Exception exception) when (
+                exception is ArgumentException ||
+                exception is NotSupportedException ||
+                exception is PathTooLongException)
+            {
+                return filePath;
+            }
+        }
+
+        private static string NormalizePath(string path)
+        {
+            return path
+                .Replace(Path.DirectorySeparatorChar, '/')
+                .Replace(Path.AltDirectorySeparatorChar, '/');
+        }
+    }
 }

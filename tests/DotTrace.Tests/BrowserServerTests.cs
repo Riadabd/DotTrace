@@ -25,6 +25,7 @@ public sealed class BrowserServerTests
         Assert.Contains("symbolSearch", html, StringComparison.Ordinal);
         Assert.Contains("projectSelect", html, StringComparison.Ordinal);
         Assert.Contains("renderMap", html, StringComparison.Ordinal);
+        Assert.Contains("location.displayPath", html, StringComparison.Ordinal);
 
         using var snapshotsDocument = await GetJsonAsync(client, "/api/snapshots");
         var snapshots = snapshotsDocument.RootElement;
@@ -38,15 +39,19 @@ public sealed class BrowserServerTests
         var symbols = symbolsDocument.RootElement;
         var symbol = Assert.Single(symbols.EnumerateArray());
         Assert.Equal("Sample.Worker.Step()", symbol.GetProperty("signatureText").GetString());
+        AssertRelativeLocation(symbol, "EntryPoint.cs");
         var symbolId = symbol.GetProperty("id").GetInt64();
 
         using var detailDocument = await GetJsonAsync(client, $"/api/symbols/{symbolId}?snapshot={snapshotId}");
         Assert.Equal("Sample.Worker.Step()", detailDocument.RootElement.GetProperty("signatureText").GetString());
+        AssertRelativeLocation(detailDocument.RootElement, "EntryPoint.cs");
 
         using var projectsDocument = await GetJsonAsync(client, $"/api/projects?snapshot={snapshotId}");
         var project = Assert.Single(projectsDocument.RootElement.EnumerateArray());
         var projectId = project.GetProperty("id").GetInt64();
         Assert.Equal("Sample.App", project.GetProperty("name").GetString());
+        Assert.True(Path.IsPathFullyQualified(project.GetProperty("filePath").GetString()!));
+        Assert.Equal("Sample.App.csproj", project.GetProperty("displayPath").GetString());
 
         using var mapDocument = await GetJsonAsync(
             client,
@@ -61,12 +66,20 @@ public sealed class BrowserServerTests
         Assert.Equal(
             "Sample.Worker.Step()",
             document.GetProperty("selectedRoot").GetProperty("displayText").GetString());
+        AssertRelativeLocation(document.GetProperty("selectedRoot"), "EntryPoint.cs");
         Assert.Equal(
             "Sample.EntryPoint.Run()",
             document.GetProperty("callersTree").GetProperty("children")[0].GetProperty("displayText").GetString());
         Assert.Equal(
             "Loop()",
             document.GetProperty("calleesTree").GetProperty("children")[0].GetProperty("displayText").GetString());
+    }
+
+    private static void AssertRelativeLocation(JsonElement node, string expectedDisplayPath)
+    {
+        var location = node.GetProperty("location");
+        Assert.True(Path.IsPathFullyQualified(location.GetProperty("filePath").GetString()!));
+        Assert.Equal(expectedDisplayPath, location.GetProperty("displayPath").GetString());
     }
 
     private static async Task<JsonDocument> GetJsonAsync(HttpClient client, string requestUri)
