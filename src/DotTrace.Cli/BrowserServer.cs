@@ -128,21 +128,23 @@ internal static class BrowserServer
         {
             return await HandleAsync(async () =>
             {
-                var symbols = await cache.SearchSymbolsAsync(
-                    dbPath,
-                    query,
-                    snapshot ?? options.InitialSnapshotId,
-                    page ?? 1,
-                    pageSize ?? 50,
-                    cancellationToken);
-
-                var formatter = await CreatePathFormatterAsync(
+                var snapshotContext = await CreateSnapshotContextAsync(
                     cache,
                     dbPath,
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
-                return Results.Ok(symbols.Select(symbol => BrowserSymbolInfo.From(symbol, formatter)).ToArray());
+                var symbols = await cache.SearchSymbolsAsync(
+                    dbPath,
+                    query,
+                    snapshotContext.SnapshotId,
+                    page ?? 1,
+                    pageSize ?? 50,
+                    cancellationToken);
+
+                return Results.Ok(symbols
+                    .Select(symbol => BrowserSymbolInfo.From(symbol, snapshotContext.Formatter))
+                    .ToArray());
             });
         });
 
@@ -153,19 +155,19 @@ internal static class BrowserServer
         {
             return await HandleAsync(async () =>
             {
-                var symbol = await cache.GetSymbolAsync(
-                    dbPath,
-                    id,
-                    snapshot ?? options.InitialSnapshotId,
-                    cancellationToken);
-
-                var formatter = await CreatePathFormatterAsync(
+                var snapshotContext = await CreateSnapshotContextAsync(
                     cache,
                     dbPath,
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
-                return Results.Ok(BrowserSymbolInfo.From(symbol, formatter));
+                var symbol = await cache.GetSymbolAsync(
+                    dbPath,
+                    id,
+                    snapshotContext.SnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(BrowserSymbolInfo.From(symbol, snapshotContext.Formatter));
             });
         });
 
@@ -175,18 +177,20 @@ internal static class BrowserServer
         {
             return await HandleAsync(async () =>
             {
-                var projects = await cache.ListProjectsAsync(
-                    dbPath,
-                    snapshot ?? options.InitialSnapshotId,
-                    cancellationToken);
-
-                var formatter = await CreatePathFormatterAsync(
+                var snapshotContext = await CreateSnapshotContextAsync(
                     cache,
                     dbPath,
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
-                return Results.Ok(projects.Select(project => BrowserProjectInfo.From(project, formatter)).ToArray());
+                var projects = await cache.ListProjectsAsync(
+                    dbPath,
+                    snapshotContext.SnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(projects
+                    .Select(project => BrowserProjectInfo.From(project, snapshotContext.Formatter))
+                    .ToArray());
             });
         });
 
@@ -205,22 +209,22 @@ internal static class BrowserServer
                     throw new DotTraceException("maxDepth must be a positive integer.");
                 }
 
-                var document = await cache.ProjectDocumentBySymbolIdAsync(
-                    dbPath,
-                    symbolId,
-                    new AnalysisOptions(maxDepth ?? options.InitialMaxDepth),
-                    snapshot ?? options.InitialSnapshotId,
-                    cancellationToken);
-
-                var formatter = await CreatePathFormatterAsync(
+                var snapshotContext = await CreateSnapshotContextAsync(
                     cache,
                     dbPath,
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
+                var document = await cache.ProjectDocumentBySymbolIdAsync(
+                    dbPath,
+                    symbolId,
+                    new AnalysisOptions(maxDepth ?? options.InitialMaxDepth),
+                    snapshotContext.SnapshotId,
+                    cancellationToken);
+
                 return Results.Ok(new BrowserTreeResponse(
                     selectedView,
-                    BrowserCallTreeDocument.From(document, formatter)));
+                    BrowserCallTreeDocument.From(document, snapshotContext.Formatter)));
             });
         });
 
@@ -242,25 +246,26 @@ internal static class BrowserServer
                     throw new DotTraceException("maxDepth must be a positive integer.");
                 }
 
-                var map = await cache.ProjectMapAsync(
-                    dbPath,
-                    projectId,
-                    new AnalysisOptions(maxDepth ?? options.InitialMaxDepth),
-                    snapshot ?? options.InitialSnapshotId,
-                    cancellationToken);
-
-                var formatter = await CreatePathFormatterAsync(
+                var snapshotContext = await CreateSnapshotContextAsync(
                     cache,
                     dbPath,
                     snapshot ?? options.InitialSnapshotId,
                     cancellationToken);
 
-                return Results.Ok(new BrowserMapResponse(BrowserCallTreeNode.From(map, formatter)));
+                var map = await cache.ProjectMapAsync(
+                    dbPath,
+                    projectId,
+                    new AnalysisOptions(maxDepth ?? options.InitialMaxDepth),
+                    snapshotContext.SnapshotId,
+                    cancellationToken);
+
+                return Results.Ok(new BrowserMapResponse(
+                    BrowserCallTreeNode.From(map, snapshotContext.Formatter)));
             });
         });
     }
 
-    private static async Task<BrowserPathFormatter> CreatePathFormatterAsync(
+    private static async Task<BrowserSnapshotContext> CreateSnapshotContextAsync(
         SqliteGraphCache cache,
         string dbPath,
         long? snapshotId,
@@ -278,7 +283,9 @@ internal static class BrowserServer
                 : new DotTraceException($"SQLite cache snapshot {snapshotId.Value} does not exist.");
         }
 
-        return BrowserPathFormatter.FromInputPath(snapshot.InputPath);
+        return new BrowserSnapshotContext(
+            snapshot.Id,
+            BrowserPathFormatter.FromInputPath(snapshot.InputPath));
     }
 
     private static async Task ValidateCacheAsync(
@@ -334,6 +341,8 @@ internal static class BrowserServer
     private sealed record BrowserTreeResponse(CallTreeView View, BrowserCallTreeDocument Document);
 
     private sealed record BrowserMapResponse(BrowserCallTreeNode Map);
+
+    private sealed record BrowserSnapshotContext(long SnapshotId, BrowserPathFormatter Formatter);
 
     private sealed record BrowserSymbolInfo(
         long Id,
