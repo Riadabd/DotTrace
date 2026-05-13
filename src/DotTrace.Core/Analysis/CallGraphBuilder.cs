@@ -785,7 +785,7 @@ public sealed class CallGraphBuilder
 
         private static string NormalizeSyntax(SyntaxNode node)
         {
-            return node.NormalizeWhitespace().ToFullString();
+            return node.NormalizeWhitespace(eol: "\n").ToFullString();
         }
 
         private void AddPropertyAccess(ExpressionSyntax node, string displayText)
