@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_dottrace-common"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/serve-viewer [options]
+
+Start the read-only DotTrace browser viewer for a SQLite cache.
+
+Options:
+  --db <path>      SQLite cache path. Default: trace.db
+  --snapshot <id>  Snapshot id to view. Default: active snapshot
+  --port <n>       Localhost port. Default: CLI chooses an available port
+  --max-depth <n>  Maximum tree depth. Default: CLI default
+  -h, --help       Show this help.
+USAGE
+}
+
+db_path="trace.db"
+snapshot_id=""
+port=""
+max_depth=""
+
+while (($#)); do
+  case "$1" in
+    --db)
+      shift
+      dottrace_require_value "--db" "${1:-}"
+      db_path="$1"
+      ;;
+    --snapshot)
+      shift
+      dottrace_require_value "--snapshot" "${1:-}"
+      snapshot_id="$1"
+      ;;
+    --port)
+      shift
+      dottrace_require_value "--port" "${1:-}"
+      port="$1"
+      ;;
+    --max-depth)
+      shift
+      dottrace_require_value "--max-depth" "${1:-}"
+      max_depth="$1"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      dottrace_die "unknown argument '$1'"
+      ;;
+  esac
+  shift
+done
+
+dottrace_cd_repo_root
+
+args=(serve --db "$db_path")
+
+if [[ -n "$snapshot_id" ]]; then
+  args+=(--snapshot "$snapshot_id")
+fi
+
+if [[ -n "$port" ]]; then
+  args+=(--port "$port")
+fi
+
+if [[ -n "$max_depth" ]]; then
+  args+=(--max-depth "$max_depth")
+fi
+
+dottrace_cli "${args[@]}"

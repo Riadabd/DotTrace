@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_dottrace-common"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/render-all-maps [options] [project ...]
+
+Render text and/or HTML maps for multiple projects.
+
+Options:
+  --db <path>       SQLite cache path. Default: trace.db
+  --out-dir <path>  Output directory. Default: artifacts/maps
+  --format <value>  Output format: text, html, or both. Default: both
+  --snapshot <id>   Snapshot id to render. Default: active snapshot
+  --max-depth <n>   Maximum tree depth. Default: CLI default
+  --no-color        Disable terminal color in text output.
+  -h, --help        Show this help.
+
+If no projects are supplied, renders DotTrace.Cli, DotTrace.Core, and DotTrace.Tests.
+USAGE
+}
+
+db_path="trace.db"
+out_dir="artifacts/maps"
+format="both"
+snapshot_id=""
+max_depth=""
+no_color=false
+projects=()
+
+while (($#)); do
+  case "$1" in
+    --db)
+      shift
+      dottrace_require_value "--db" "${1:-}"
+      db_path="$1"
+      ;;
+    --out-dir)
+      shift
+      dottrace_require_value "--out-dir" "${1:-}"
+      out_dir="$1"
+      ;;
+    --format)
+      shift
+      dottrace_require_value "--format" "${1:-}"
+      format="$1"
+      ;;
+    --snapshot)
+      shift
+      dottrace_require_value "--snapshot" "${1:-}"
+      snapshot_id="$1"
+      ;;
+    --max-depth)
+      shift
+      dottrace_require_value "--max-depth" "${1:-}"
+      max_depth="$1"
+      ;;
+    --no-color)
+      no_color=true
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      projects+=("$@")
+      break
+      ;;
+    -*)
+      dottrace_die "unknown argument '$1'"
+      ;;
+    *)
+      projects+=("$1")
+      ;;
+  esac
+  shift
+done
+
+case "$format" in
+  text|html|both)
+    ;;
+  *)
+    dottrace_die "--format must be text, html, or both"
+    ;;
+esac
+
+if ((${#projects[@]} == 0)); then
+  projects=(DotTrace.Cli DotTrace.Core DotTrace.Tests)
+fi
+
+render_formats=()
+case "$format" in
+  both)
+    render_formats=(text html)
+    ;;
+  *)
+    render_formats=("$format")
+    ;;
+esac
+
+dottrace_cd_repo_root
+mkdir -p -- "$out_dir"
+
+for project in "${projects[@]}"; do
+  safe_project="${project//\//_}"
+  safe_project="${safe_project// /_}"
+  safe_project="${safe_project//:/_}"
+
+  for render_format in "${render_formats[@]}"; do
+    extension="$render_format"
+    if [[ "$render_format" == "text" ]]; then
+      extension="txt"
+    fi
+    out_path="$out_dir/$safe_project.map.$extension"
+    args=(map --db "$db_path" --project "$project" --format "$render_format" --out "$out_path")
+
+    if [[ -n "$snapshot_id" ]]; then
+      args+=(--snapshot "$snapshot_id")
+    fi
+
+    if [[ -n "$max_depth" ]]; then
+      args+=(--max-depth "$max_depth")
+    fi
+
+    if [[ "$no_color" == true ]]; then
+      args+=(--no-color)
+    fi
+
+    printf 'Rendering %s as %s -> %s\n' "$project" "$render_format" "$out_path"
+    dottrace_cli "${args[@]}"
+  done
+done

@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_dottrace-common"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/list-projects [options]
+
+List projects in a solution and show values usable with --project.
+
+Options:
+  --solution <path>  Solution to inspect. Default: DotTrace.sln
+  --format <value>   Output format: table, names, paths, or tsv. Default: table
+  -h, --help         Show this help.
+USAGE
+}
+
+solution_path="DotTrace.sln"
+format="table"
+
+while (($#)); do
+  case "$1" in
+    --solution)
+      shift
+      dottrace_require_value "--solution" "${1:-}"
+      solution_path="$1"
+      ;;
+    --format)
+      shift
+      dottrace_require_value "--format" "${1:-}"
+      format="$1"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      dottrace_die "unknown argument '$1'"
+      ;;
+  esac
+  shift
+done
+
+case "$format" in
+  table|names|paths|tsv)
+    ;;
+  *)
+    dottrace_die "--format must be table, names, paths, or tsv"
+    ;;
+esac
+
+dottrace_cd_repo_root
+
+if [[ ! -f "$solution_path" ]]; then
+  dottrace_die "solution '$solution_path' does not exist"
+fi
+
+mapfile -t project_paths < <(dotnet sln "$solution_path" list | awk '/\.csproj$/ { print }')
+
+if ((${#project_paths[@]} == 0)); then
+  dottrace_die "solution '$solution_path' does not contain any projects"
+fi
+
+case "$format" in
+  table)
+    project_header="Project"
+    project_width=${#project_header}
+    for project_path in "${project_paths[@]}"; do
+      project_file="${project_path##*/}"
+      project_name="${project_file%.csproj}"
+      if ((${#project_name} > project_width)); then
+        project_width=${#project_name}
+      fi
+    done
+
+    printf -v project_separator '%*s' "$project_width" ''
+    project_separator="${project_separator// /-}"
+
+    printf '%-*s  %s\n' "$project_width" "$project_header" "Path"
+    printf '%-*s  %s\n' "$project_width" "$project_separator" "----"
+    ;;
+esac
+
+for project_path in "${project_paths[@]}"; do
+  project_file="${project_path##*/}"
+  project_name="${project_file%.csproj}"
+
+  case "$format" in
+    table)
+      printf '%-*s  %s\n' "$project_width" "$project_name" "$project_path"
+      ;;
+    names)
+      printf '%s\n' "$project_name"
+      ;;
+    paths)
+      printf '%s\n' "$project_path"
+      ;;
+    tsv)
+      printf '%s\t%s\n' "$project_name" "$project_path"
+      ;;
+  esac
+done
